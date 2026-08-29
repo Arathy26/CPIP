@@ -1,266 +1,203 @@
-{
-  "students": [
-    {
-      "id": 1,
-      "name": "Arathy Rajeev",
-      "email": "arathy@gmail.com",
-      "degree": "BBA",
-      "cgpa": 7.0,
-      "location": "Kochi",
-      "target_role": "AI Engineer",
-      "github_link": "https://github.com/arathy26",
-      "linkedin_id": "https://www.linkedin.com/in/arathy-rajeev",
-      "resume": "arathy_resume.pdf",
-      "salary_expected": 500000
-    },
-    {
-      "id": 2,
-      "name": "Archana Rajeev",
-      "email": "archana@gmail.com",
-      "degree": "BBA",
-      "cgpa": 8.0,
-      "location": "Kochi",
-      "target_role": "Backend Developer",
-      "github_link": "https://github.com/archana",
-      "linkedin_id": "https://www.linkedin.com/in/archana-rajeev",
-      "resume": "archana_resume.pdf",
-      "salary_expected": 600000
-    },
-    {
-      "id": 3,
-      "name": "Anamika P",
-      "email": "anamika@gmail.com",
-      "degree": "B.Tech",
-      "cgpa": 8.5,
-      "location": "Bangalore",
-      "target_role": "Full Stack Developer",
-      "github_link": "https://github.com/anamika",
-      "linkedin_id": "https://www.linkedin.com/in/anamika-p",
-      "resume": "anamika_resume.pdf",
-      "salary_expected": 700000
-    }
-  ],
+"""
+CPIP Seed Data — SINGLE SOURCE OF TRUTH
 
-  "skills": [
-    {
-      "id": 1,
-      "skill_name": "Python",
-      "category": "Backend",
-      "difficulty_level": "Intermediate",
-      "description": "Python programming for backend development"
-    },
-    {
-      "id": 2,
-      "skill_name": "React",
-      "category": "Frontend",
-      "difficulty_level": "Intermediate",
-      "description": "React for building user interfaces"
-    },
-    {
-      "id": 3,
-      "skill_name": "SQL",
-      "category": "Database",
-      "difficulty_level": "Beginner",
-      "description": "SQL for database management"
-    },
-    {
-      "id": 4,
-      "skill_name": "FastAPI",
-      "category": "Backend",
-      "difficulty_level": "Intermediate",
-      "description": "FastAPI framework for building APIs"
-    },
-    {
-      "id": 5,
-      "skill_name": "Docker",
-      "category": "DevOps",
-      "difficulty_level": "Intermediate",
-      "description": "Docker for containerization"
-    }
-  ],
+CHANGED (big one): no more loading a seed JSON file at all. Every store
+(students, jobs, resumes, notifications) starts genuinely empty and is
+populated only by REAL actions — a real resume upload, a real job
+posting. The old file also carried a static "skills" vocabulary; that's
+gone too, replaced by get_or_fetch_market_skills(), which pulls the
+REAL skills the job market demands for a specific role (via JSearch),
+not a fixed hand-picked list. CPIP_Seed_Data.json is no longer read by
+any code — safe to delete.
+"""
 
-  "student_skills": [
-    {
-      "id": 1,
-      "student_id": 1,
-      "skill_id": 1,
-      "proficiency_level": "Intermediate"
-    },
-    {
-      "id": 2,
-      "student_id": 1,
-      "skill_id": 2,
-      "proficiency_level": "Beginner"
-    },
-    {
-      "id": 3,
-      "student_id": 1,
-      "skill_id": 3,
-      "proficiency_level": "Beginner"
-    },
-    {
-      "id": 4,
-      "student_id": 2,
-      "skill_id": 1,
-      "proficiency_level": "Intermediate"
-    },
-    {
-      "id": 5,
-      "student_id": 2,
-      "skill_id": 4,
-      "proficiency_level": "Intermediate"
-    },
-    {
-      "id": 6,
-      "student_id": 2,
-      "skill_id": 3,
-      "proficiency_level": "Intermediate"
-    },
-    {
-      "id": 7,
-      "student_id": 3,
-      "skill_id": 1,
-      "proficiency_level": "Intermediate"
-    },
-    {
-      "id": 8,
-      "student_id": 3,
-      "skill_id": 2,
-      "proficiency_level": "Intermediate"
-    },
-    {
-      "id": 9,
-      "student_id": 3,
-      "skill_id": 3,
-      "proficiency_level": "Intermediate"
-    }
-  ],
+from datetime import datetime
+import time
 
-  "jobs": [
-    {
-      "id": 1,
-      "job_title": "Junior AI Engineer",
-      "company_name": "Google",
-      "location": "Bangalore",
-      "salary_range": "500000-800000",
-      "job_description": "Build AI models and solutions for Google Cloud",
-      "job_type": "Full-time",
-      "experience_level": "Fresher",
-      "application_deadline": "2026-08-31",
-      "application_link": "https://careers.google.com/job1"
-    },
-    {
-      "id": 2,
-      "job_title": "Junior Backend Developer",
-      "company_name": "Microsoft",
-      "location": "Kochi",
-      "salary_range": "600000-900000",
-      "job_description": "Develop backend APIs and services",
-      "job_type": "Full-time",
-      "experience_level": "Fresher",
-      "application_deadline": "2026-08-15",
-      "application_link": "https://careers.microsoft.com/job2"
-    },
-    {
-      "id": 3,
-      "job_title": "Full Stack Developer Intern",
-      "company_name": "Amazon",
-      "location": "Bangalore",
-      "salary_range": "300000-500000",
-      "job_description": "Build full-stack web applications",
-      "job_type": "Internship",
-      "experience_level": "Fresher",
-      "application_deadline": "2026-07-31",
-      "application_link": "https://careers.amazon.com/job3"
-    }
-  ],
+_STUDENTS_BY_ID = {}
+_NEXT_STUDENT_ID = 1
 
-  "job_requirements": [
-    {
-      "id": 1,
-      "job_id": 1,
-      "skill_id": 1,
-      "is_mandatory": true,
-      "years_of_experience": 0
-    },
-    {
-      "id": 2,
-      "job_id": 1,
-      "skill_id": 3,
-      "is_mandatory": false,
-      "years_of_experience": 0
-    },
-    {
-      "id": 3,
-      "job_id": 2,
-      "skill_id": 1,
-      "is_mandatory": true,
-      "years_of_experience": 0
-    },
-    {
-      "id": 4,
-      "job_id": 2,
-      "skill_id": 4,
-      "is_mandatory": true,
-      "years_of_experience": 0
-    },
-    {
-      "id": 5,
-      "job_id": 2,
-      "skill_id": 3,
-      "is_mandatory": true,
-      "years_of_experience": 0
-    },
-    {
-      "id": 6,
-      "job_id": 3,
-      "skill_id": 1,
-      "is_mandatory": true,
-      "years_of_experience": 0
-    },
-    {
-      "id": 7,
-      "job_id": 3,
-      "skill_id": 2,
-      "is_mandatory": true,
-      "years_of_experience": 0
-    },
-    {
-      "id": 8,
-      "job_id": 3,
-      "skill_id": 3,
-      "is_mandatory": false,
-      "years_of_experience": 0
-    }
-  ],
 
-  "assessments": [
-    {
-      "id": 1,
-      "student_id": 1,
-      "skill_gap_score": 65,
-      "portfolio_readiness_score": 70,
-      "resume_readiness_score": 75,
-      "interview_readiness_score": 60,
-      "assessment_date": "2026-07-12"
-    },
-    {
-      "id": 2,
-      "student_id": 2,
-      "skill_gap_score": 85,
-      "portfolio_readiness_score": 80,
-      "resume_readiness_score": 85,
-      "interview_readiness_score": 78,
-      "assessment_date": "2026-07-12"
-    },
-    {
-      "id": 3,
-      "student_id": 3,
-      "skill_gap_score": 90,
-      "portfolio_readiness_score": 85,
-      "resume_readiness_score": 88,
-      "interview_readiness_score": 82,
-      "assessment_date": "2026-07-12"
+def get_student(student_id):
+    return _STUDENTS_BY_ID.get(student_id)
+
+
+def get_all_students():
+    return list(_STUDENTS_BY_ID.values())
+
+
+def add_student(student_data):
+    global _NEXT_STUDENT_ID
+    new_student = {
+        "id": _NEXT_STUDENT_ID,
+        "name": student_data.get("name", "Candidate"),
+        "email": student_data.get("email", ""),
+        "degree": student_data.get("degree", "Not specified"),
+        "cgpa": student_data.get("cgpa", 0),
+        "location": student_data.get("location", "Not specified"),
+        "target_role": student_data.get("target_role", ""),
+        "github_link": student_data.get("github_link", ""),
+        "linkedin_id": student_data.get("linkedin_id", ""),
+        "resume": student_data.get("resume", ""),
+        "salary_expected": student_data.get("salary_expected", 0),
+        "skills": student_data.get("skills", []),
     }
-  ]
-}
+    _STUDENTS_BY_ID[_NEXT_STUDENT_ID] = new_student
+    _NEXT_STUDENT_ID += 1
+    return new_student
+
+
+def get_readiness_scores(student_id):
+    return {
+        "skill_gap_score": 0,
+        "portfolio_score": 0,
+        "resume_score": 0,
+        "interview_readiness_score": 0,
+    }
+
+
+def get_role_requirements(role_name):
+    return None
+
+
+def get_role_names():
+    return []
+
+
+def get_all_target_roles():
+    return {}
+
+
+_JOBS = []
+_NEXT_JOB_ID = 1
+
+
+def get_all_jobs():
+    return _JOBS
+
+
+def get_job(job_id):
+    return next((j for j in _JOBS if j["id"] == job_id), None)
+
+
+def search_jobs(jobs, query):
+    if not query or not query.strip():
+        return jobs
+
+    q = query.strip().lower()
+    results = []
+    for job in jobs:
+        haystack = " ".join([
+            job.get("job_title", ""),
+            job.get("company_name", ""),
+            job.get("location", ""),
+            " ".join(job.get("required_skills", [])),
+            " ".join(job.get("preferred_skills", [])),
+        ]).lower()
+        if q in haystack:
+            results.append(job)
+    return results
+
+
+def add_job(job_data):
+    global _NEXT_JOB_ID
+    new_job = {
+        "id": _NEXT_JOB_ID,
+        "job_title": job_data["job_title"],
+        "company_name": job_data.get("company_name", "Unknown"),
+        "location": job_data.get("location", "Remote"),
+        "required_skills": job_data.get("required_skills", []),
+        "preferred_skills": job_data.get("preferred_skills", []),
+        "min_cgpa": job_data.get("min_cgpa", 0),
+        "min_readiness": job_data.get("min_readiness", 0),
+        "experience_level": job_data.get("experience_level") or "Not specified",
+        "posted_date": datetime.now().strftime("%b %d, %Y"),
+    }
+    _JOBS.append(new_job)
+    _NEXT_JOB_ID += 1
+    return new_job
+
+
+_RESUMES_BY_STUDENT = {}
+
+
+def get_resume(student_id):
+    return _RESUMES_BY_STUDENT.get(student_id)
+
+
+def add_resume(student_id, resume_data):
+    _RESUMES_BY_STUDENT[student_id] = resume_data
+    return resume_data
+
+
+_NOTIFICATIONS = []
+_NEXT_NOTIFICATION_ID = 1
+
+
+def add_notification(student_id, job_id, job_title, company_name, fit_score, suitability):
+    global _NEXT_NOTIFICATION_ID
+    notification = {
+        "id": _NEXT_NOTIFICATION_ID,
+        "student_id": student_id,
+        "job_id": job_id,
+        "job_title": job_title,
+        "company_name": company_name,
+        "fit_score": fit_score,
+        "suitability": suitability,
+        "created_at": datetime.now().strftime("%b %d, %Y %H:%M"),
+        "read": False,
+    }
+    _NOTIFICATIONS.append(notification)
+    _NEXT_NOTIFICATION_ID += 1
+    return notification
+
+
+def get_notifications_for_student(student_id):
+    return sorted(
+        [n for n in _NOTIFICATIONS if n["student_id"] == student_id],
+        key=lambda n: n["id"],
+        reverse=True,
+    )
+
+
+def mark_notification_read(notification_id):
+    for n in _NOTIFICATIONS:
+        if n["id"] == notification_id:
+            n["read"] = True
+            return n
+    return None
+
+
+_MARKET_SKILL_CACHE = {}
+_MARKET_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def get_cached_market_skill_demand(target_role):
+    key = target_role.strip().lower()
+    entry = _MARKET_SKILL_CACHE.get(key)
+    if entry is None:
+        return None
+    if time.time() - entry["cached_at"] > _MARKET_CACHE_TTL_SECONDS:
+        return None
+    return entry
+
+
+def cache_market_skill_demand(target_role, skill_frequency, total_postings):
+    key = target_role.strip().lower()
+    entry = {
+        "skill_frequency": skill_frequency,
+        "total_postings": total_postings,
+        "cached_at": time.time(),
+    }
+    _MARKET_SKILL_CACHE[key] = entry
+    return entry
+
+
+def get_or_fetch_market_skills(target_role):
+    from app.services.external_jobs_service import fetch_market_skill_frequency
+
+    cached = get_cached_market_skill_demand(target_role)
+    if cached is None:
+        skill_frequency, total_postings = fetch_market_skill_frequency(target_role)
+        cached = cache_market_skill_demand(target_role, skill_frequency, total_postings)
+    return cached["skill_frequency"]

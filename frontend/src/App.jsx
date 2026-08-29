@@ -1,47 +1,29 @@
-import { useState, useEffect } from 'react';
-import './index.css';
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 
-export default function App() {
-  const [backendStatus, setBackendStatus] = useState('checking...');
-  const [loading, setLoading] = useState(true);
+import LandingPage from './pages/LandingPage';
+import CandidateDashboard from './pages/CandidateDashboard';
+import RecruiterDashboard from './pages/RecruiterDashboard';
+import StudentsListPage from './pages/StudentsListPage';
+import RoleSelector from './components/upload/RoleSelector';
+import ResumeUploader from './components/upload/ResumeUploader';
 
-  useEffect(() => {
-    fetch('http://localhost:8000/health')
-      .then(res => res.json())
-      .then(data => {
-        setBackendStatus('✅ ' + data.message);
-        setLoading(false);
-      })
-      .catch(err => {
-        setBackendStatus('❌ Backend not running');
-        setLoading(false);
-      });
-  }, []);
+import './App.css';
 
+function App() {
   return (
-    <div className="app">
-      <header className="header">
-        <h1>CPIP</h1>
-        <p>Career & Placement Intelligence Platform</p>
-      </header>
-
-      <main className="main">
-        <section className="status-card">
-          <h2>Backend Status</h2>
-          <p className={loading ? 'checking' : 'ready'}>
-            {backendStatus}
-          </p>
-        </section>
-
-        <section className="info-card">
-          <h2>Phase 1.1 — Platform Foundation</h2>
-          <ul>
-            <li>✅ Backend API running</li>
-            <li>✅ Frontend initialized</li>
-            <li>✅ Health check working</li>
-          </ul>
-        </section>
-      </main>
-    </div>
+    <Router>
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/students" element={<StudentsListPage />} />
+        <Route path="/role-select" element={<RoleSelector />} />
+        <Route path="/resume-upload" element={<ResumeUploader />} />
+        <Route path="/dashboard/candidate/:studentId" element={<CandidateDashboard />} />
+        <Route path="/dashboard/recruiter" element={<RecruiterDashboard />} />
+        <Route path="*" element={<Navigate to="/" />} />
+      </Routes>
+    </Router>
   );
 }
+
+export default App;

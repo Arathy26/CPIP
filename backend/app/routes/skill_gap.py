@@ -1,131 +1,139 @@
 """
-Skill Gap Routes
-API endpoints for skill gap evaluation
+Skill Gap Agent - Location-Aware with On-Demand Market Cache Population
+No hardcoding — dynamically fetches market data from Adzuna via Groq
 """
 
-from fastapi import APIRouter, HTTPException
-from app.agents.skill_gap_agent import skill_gap_agent, validate_gap_result
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from app.data.database import SessionLocal, StudentModel, MarketSkillCacheModel
+import json
 
 router = APIRouter()
 
-# Sample role requirements (from database design)
-ROLE_REQUIREMENTS = {
-    "AI Engineer": {
-        "required_skills": ["Python", "Machine Learning", "TensorFlow", "Data Analysis"],
-        "mandatory_skills": ["Python", "Machine Learning"]
-    },
-    "Backend Developer": {
-        "required_skills": ["Python", "FastAPI", "SQL", "Docker"],
-        "mandatory_skills": ["Python", "FastAPI", "SQL"]
-    },
-    "Full Stack Developer": {
-        "required_skills": ["Python", "React", "SQL", "APIs"],
-        "mandatory_skills": ["Python", "React", "SQL"]
-    }
-}
-
-# Sample student skills (from CPIP_Seed_Data.json)
-STUDENT_SKILLS = {
-    1: ["Python", "React", "SQL"],  # Arathy
-    2: ["Python", "FastAPI", "SQL"],  # Archana
-    3: ["Python", "React", "SQL"]  # Anamika
-}
-
-# Student target roles
-STUDENT_TARGET_ROLES = {
-    1: "AI Engineer",
-    2: "Backend Developer",
-    3: "Full Stack Developer"
-}
-
 
 @router.get("/skill-gap/{student_id}")
-def get_skill_gap(student_id: int):
-    """
-    Get skill gap analysis for a student.
-    
-    Args:
-        student_id: ID of the student
-        
-    Returns:
-        Skill gap analysis with score and missing skills
-    """
-    
-    # Check if student exists
-    if student_id not in STUDENT_SKILLS:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Student {student_id} not found"
-        )
-    
-    # Get student data
-    candidate_skills = STUDENT_SKILLS[student_id]
-    target_role = STUDENT_TARGET_ROLES[student_id]
-    
-    # Check if role exists
-    if target_role not in ROLE_REQUIREMENTS:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Role {target_role} not found"
-        )
-    
-    # Get role requirements
-    role_data = ROLE_REQUIREMENTS[target_role]
-    required_skills = role_data["required_skills"]
-    mandatory_skills = role_data["mandatory_skills"]
-    
-    # Run Skill Gap Agent
-    gap_result = skill_gap_agent(
-        candidate_skills=candidate_skills,
-        required_skills=required_skills,
-        mandatory_skills=mandatory_skills
-    )
-    
-    # Validate result
-    validation = validate_gap_result(gap_result)
-    
-    # Return gap analysis with validation
-    return {
-        "student_id": student_id,
-        "target_role": target_role,
-        "candidate_skills": candidate_skills,
-        "gap_analysis": gap_result,
-        "validation": validation,
-        "message": "Skill gap analysis completed successfully"
-    }
+def get_skill_gap(student_id: int, role: str = None):
+    db = SessionLocal()
+    try:
+        student = db.query(StudentModel).filter(StudentModel.id == student_id).first()
+        if not student:
+            return JSONResponse(status_code=404, content={"detail": "Student not found"})
 
+        target_role = role or student.target_role
+        if not target_role:
+            return JSONResponse(status_code=400, content={"detail": "No target role specified"})
 
-@router.get("/skill-gap")
-def list_all_skill_gaps():
-    """
-    Get skill gap analysis for all students.
-    
-    Returns:
-        List of all student skill gaps
-    """
-    
-    results = []
-    
-    for student_id in STUDENT_SKILLS:
-        candidate_skills = STUDENT_SKILLS[student_id]
-        target_role = STUDENT_TARGET_ROLES[student_id]
-        role_data = ROLE_REQUIREMENTS[target_role]
-        
-        gap_result = skill_gap_agent(
-            candidate_skills=candidate_skills,
-            required_skills=role_data["required_skills"],
-            mandatory_skills=role_data["mandatory_skills"]
-        )
-        
-        results.append({
-            "student_id": student_id,
-            "target_role": target_role,
-            "gap_score": gap_result["gap_score"],
-            "readiness_level": gap_result["readiness_level"]
-        })
-    
-    return {
-        "total_students": len(results),
-        "skill_gaps": results,
-        "message": "All skill gaps retrieved"
-    }
+        # Parse student skills
+        student_skills = []
+        if student.skills:
+            try:
+                student_skills = json.loads(student.skills) if isinstance(student.skills, str) else student.skills
+            except:
+                student_skills = [s.strip() for s in str(student.skills).split(",")]
+
+        # Get student location
+        student_location = (student.location or "india").lower().strip()
+        location_map = {
+            "bangalore": "bangalore", "bengaluru": "bangalore",
+            "delhi": "delhi", "new delhi": "delhi",
+            "mumbai": "mumbai", "bombay": "mumbai",
+            "hyderabad": "hyderabad", "pune": "pune",
+            "kochi": "kochi", "cochin": "kochi",
+            "remote": "india", "not specified": "india",
+        }
+        normalized_location = location_map.get(student_location, student_location)
+
+        def fetch_market_skills(location, role_name):
+            """Fetch market skills from cache for given location and role"""
+            skills = db.query(MarketSkillCacheModel).filter(
+                MarketSkillCacheModel.target_role == role_name.lower().strip(),
+                MarketSkillCacheModel.location == location
+            ).all()
+            return skills
+
+        # Try location-specific market skills
+        market_skills = fetch_market_skills(normalized_location, target_role)
+
+        # Fallback to india-wide
+        if not market_skills and normalized_location != "india":
+            print(f"No cache for {normalized_location}, trying india...")
+            market_skills = fetch_market_skills("india", target_role)
+
+        # Fallback to any location
+        if not market_skills:
+            market_skills = db.query(MarketSkillCacheModel).filter(
+                MarketSkillCacheModel.target_role == target_role.lower().strip()
+            ).all()
+
+        # ── ON-DEMAND POPULATE if still empty ──────────────────────
+        if not market_skills:
+            print(f"🔄 On-demand market cache populate for {normalized_location}/{target_role}")
+            try:
+                from app.services.market_skill_fetcher import populate_market_skills_for_location_and_role
+                populate_market_skills_for_location_and_role(
+                    location=normalized_location,
+                    target_role=target_role.lower().strip(),
+                    max_postings=25
+                )
+                # Re-query after populate
+                market_skills = fetch_market_skills(normalized_location, target_role)
+                if not market_skills:
+                    market_skills = fetch_market_skills("india", target_role)
+                print(f"✅ On-demand populate done: {len(market_skills)} skills cached")
+            except Exception as e:
+                print(f"⚠️ On-demand populate failed: {e}")
+
+        if not market_skills:
+            return {
+                "gap_analysis": {
+                    "gap_score": 0,
+                    "matched_skills": [],
+                    "missing_skills": [],
+                    "target_role": target_role,
+                    "location": normalized_location,
+                    "message": f"Could not fetch market data for '{target_role}' in '{normalized_location}'.",
+                }
+            }
+
+        # Calculate gap
+        matched = []
+        missing_with_weight = []
+
+        for market_skill in market_skills:
+            skill_name = market_skill.skill_name
+            demand_weight = market_skill.demand_weight
+
+            has_skill = any(
+                skill_name.lower() in s.lower() or s.lower() in skill_name.lower()
+                for s in student_skills
+            )
+
+            if has_skill:
+                matched.append(skill_name)
+            else:
+                missing_with_weight.append({
+                    "skill": skill_name,
+                    "demand_weight": demand_weight,
+                    "jobs_requiring": market_skill.postings_requiring_it
+                })
+
+        missing_with_weight.sort(key=lambda x: x["demand_weight"], reverse=True)
+
+        total = len(market_skills)
+        gap_score = int((len(matched) / total * 100)) if total > 0 else 0
+
+        return {
+            "gap_analysis": {
+                "gap_score": gap_score,
+                "matched_skills": matched,
+                "missing_skills": missing_with_weight,
+                "target_role": target_role,
+                "location": normalized_location,
+                "total_market_skills": total,
+                "matched_count": len(matched),
+                "missing_count": len(missing_with_weight),
+                "basedOnPostings": True
+            }
+        }
+    finally:
+        db.close()

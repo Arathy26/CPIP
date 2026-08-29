@@ -1,95 +1,123 @@
 """
-Training Recommendation Routes
-API endpoints for training plan recommendations
+Training Recommendation Agent - CLEANED (No Hardcoding)
+Recommends training based on MARKET DEMAND (not hardcoded training plans)
 """
 
-from fastapi import APIRouter, HTTPException
-from app.agents.training_recommendation_agent import training_recommendation_agent, validate_training_result
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from app.data.database import SessionLocal, StudentModel, MarketSkillCacheModel
+import json
 
 router = APIRouter()
 
-# Aggregate all assessments for students (from all previous agents)
-STUDENT_ASSESSMENTS = {
-    1: {  # Arathy
-        "skill_gap": {"score": 65, "missing_skills": ["Machine Learning", "TensorFlow"]},
-        "portfolio": {"score": 50, "evidence_missing": ["Deployed Demo"]},
-        "resume": {"score": 100, "sections_missing": []},
-        "interview": {"score": 70, "weak_dimensions": ["Communication", "Project Explanation"]},
-        "target_role": "Full Stack Developer"
-    },
-    2: {  # Archana
-        "skill_gap": {"score": 85, "missing_skills": []},
-        "portfolio": {"score": 100, "evidence_missing": []},
-        "resume": {"score": 100, "sections_missing": []},
-        "interview": {"score": 80, "weak_dimensions": []},
-        "target_role": "Backend Developer"
-    },
-    3: {  # Anamika
-        "skill_gap": {"score": 75, "missing_skills": ["Docker"]},
-        "portfolio": {"score": 75, "evidence_missing": []},
-        "resume": {"score": 80, "sections_missing": []},
-        "interview": {"score": 70, "weak_dimensions": ["Technical"]},
-        "target_role": "Full Stack Developer"
-    }
-}
-
-
 @router.get("/training-plan/{student_id}")
-def get_training_plan(student_id: int):
+def get_training_plan(student_id: int, role: str = None):
     """
-    Get personalized training plan for a student.
+    Generate training plan based on MARKET DATA (not hardcoded plans)
     
-    Args:
-        student_id: ID of the student
+    Flow:
+    1. Get student skills and target role
+    2. Fetch market skills with demand weights
+    3. Find missing skills (not hardcoded)
+    4. Sort by demand weight (market-driven)
+    5. Create learning path for top 5
+    """
+    db = SessionLocal()
+    try:
+        # Get student
+        student = db.query(StudentModel).filter(StudentModel.id == student_id).first()
+        if not student:
+            return JSONResponse(status_code=404, content={"detail": "Student not found"})
         
-    Returns:
-        Training plan with prioritized actions
-    """
-    
-    if student_id not in STUDENT_ASSESSMENTS:
-        raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
-    
-    assessments = STUDENT_ASSESSMENTS[student_id]
-    
-    # Run Training Recommendation Agent
-    training_result = training_recommendation_agent(assessments)
-    
-    # Validate result
-    validation = validate_training_result(training_result)
-    
-    return {
-        "student_id": student_id,
-        "training_plan": training_result,
-        "validation": validation,
-        "message": "Training plan created successfully"
-    }
-
-
-@router.get("/training-plan")
-def list_all_training_plans():
-    """
-    Get training plans for all students.
-    
-    Returns:
-        Training plans for all students
-    """
-    
-    results = []
-    
-    for student_id in STUDENT_ASSESSMENTS:
-        assessments = STUDENT_ASSESSMENTS[student_id]
-        training_result = training_recommendation_agent(assessments)
+        # Get target role
+        target_role = role or student.target_role
+        if not target_role:
+            return JSONResponse(status_code=400, content={"detail": "No target role specified"})
         
-        results.append({
-            "student_id": student_id,
-            "target_role": training_result["target_role"],
-            "overall_readiness": training_result["current_overall_readiness"],
-            "total_weeks": training_result["total_estimated_weeks"],
-            "action_count": len(training_result["training_actions"])
-        })
-    
-    return {
-        "total_students": len(results),
-        "training_plans": results,
-        "message": "All training plans retrieved"
-    }
+        # Parse student skills
+        student_skills = []
+        if student.skills:
+            try:
+                student_skills = json.loads(student.skills) if isinstance(student.skills, str) else student.skills
+            except:
+                student_skills = [s.strip() for s in str(student.skills).split(",")]
+        
+        # Get market skills from database (market_skill_fetcher populates this)
+        market_skills = db.query(MarketSkillCacheModel).filter(
+            MarketSkillCacheModel.target_role == target_role
+        ).all()
+        
+        if not market_skills:
+            return {
+                "training_plan": {
+                    "priority_actions": [],
+                    "message": f"No market data yet for {target_role}. Run market fetcher first."
+                }
+            }
+        
+        # Find missing skills
+        missing_skills = []
+        
+        for market_skill in market_skills:
+            skill_name = market_skill.skill_name
+            demand_weight = market_skill.demand_weight
+            postings = market_skill.postings_requiring_it
+            
+            has_skill = any(
+                skill_name.lower() in s.lower() or s.lower() in skill_name.lower() 
+                for s in student_skills
+            )
+            
+            if not has_skill:
+                missing_skills.append({
+                    "skill": skill_name,
+                    "demand_weight": demand_weight,
+                    "jobs_count": postings
+                })
+        
+        # Sort by demand weight (market-driven, not hardcoded)
+        missing_skills.sort(key=lambda x: x["demand_weight"], reverse=True)
+        
+        # Top 5 priority skills
+        top_5 = missing_skills[:5]
+        
+        # Generate training actions (dynamic, not hardcoded)
+        training_actions = []
+        
+        for idx, item in enumerate(top_5, 1):
+            skill = item["skill"]
+            demand = item["demand_weight"]
+            jobs_count = item["jobs_count"]
+            
+            # Estimate duration based on complexity (can be ML model later)
+            # For now, use demand to estimate: higher demand = more foundational = longer
+            if demand > 80:
+                duration_weeks = 4
+                urgency = "urgent"
+            elif demand > 60:
+                duration_weeks = 3
+                urgency = "high"
+            else:
+                duration_weeks = 2
+                urgency = "medium"
+            
+            training_actions.append({
+                "rank": idx,
+                "skill": skill,
+                "demand_weight": demand,
+                "jobs_requiring": jobs_count,
+                "estimated_weeks": duration_weeks,
+                "urgency": urgency,
+                "reason": f"{demand}% of {target_role} jobs require this skill"
+            })
+        
+        return {
+            "training_plan": {
+                "target_role": target_role,
+                "priority_actions": training_actions,
+                "total_missing": len(missing_skills),
+                "top_5_count": len(top_5)
+            }
+        }
+    finally:
+        db.close()

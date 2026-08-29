@@ -5,61 +5,35 @@ API endpoints for placement workflow tracking
 
 from fastapi import APIRouter, HTTPException
 from app.agents.placement_workflow_agent import placement_workflow_agent, validate_workflow_result
+from app.data import seed_data
 
 router = APIRouter()
 
-# Placement workflow data for students
-PLACEMENT_WORKFLOW_DATA = {
-    1: {
-        "student_id": 1,
-        "job_applied": "Junior Full Stack Developer",
-        "current_stage": "shortlisted",
+# In-memory workflow store
+_WORKFLOWS = {}
+
+
+def _get_default_workflow(student):
+    return {
+        "student_id": student["id"],
+        "job_applied": student.get("target_role", "Not specified"),
+        "current_stage": "not_applied",
         "interview_rounds_completed": 0,
-        "application_date": "2026-07-15",
-        "last_update": "2026-07-18"
-    },
-    2: {
-        "student_id": 2,
-        "job_applied": "Junior Backend Developer",
-        "current_stage": "technical_round",
-        "interview_rounds_completed": 0,
-        "application_date": "2026-07-10",
-        "last_update": "2026-07-19"
-    },
-    3: {
-        "student_id": 3,
-        "job_applied": "Junior Full Stack Developer",
-        "current_stage": "applied",
-        "interview_rounds_completed": 0,
-        "application_date": "2026-07-16",
-        "last_update": "2026-07-18"
+        "application_date": None,
+        "last_update": None,
     }
-}
 
 
 @router.get("/placement-workflow/{student_id}")
 def get_placement_workflow(student_id: int):
-    """
-    Get placement workflow status for a student.
-    
-    Args:
-        student_id: ID of the student
-        
-    Returns:
-        Current workflow status and next action
-    """
-    
-    if student_id not in PLACEMENT_WORKFLOW_DATA:
+    student = seed_data.get_student(student_id)
+    if not student:
         raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
-    
-    workflow_data = PLACEMENT_WORKFLOW_DATA[student_id]
-    
-    # Run Placement Workflow Agent
+
+    workflow_data = _WORKFLOWS.get(student_id, _get_default_workflow(student))
     workflow_result = placement_workflow_agent(workflow_data)
-    
-    # Validate result
     validation = validate_workflow_result(workflow_result)
-    
+
     return {
         "student_id": student_id,
         "placement_workflow": workflow_result,
@@ -70,19 +44,13 @@ def get_placement_workflow(student_id: int):
 
 @router.get("/placement-workflow")
 def list_all_placement_workflows():
-    """
-    Get placement workflow status for all students.
-    
-    Returns:
-        Workflow status summary for all students
-    """
-    
     results = []
-    
-    for student_id in PLACEMENT_WORKFLOW_DATA:
-        workflow_data = PLACEMENT_WORKFLOW_DATA[student_id]
+
+    for student in seed_data.get_all_students():
+        student_id = student["id"]
+        workflow_data = _WORKFLOWS.get(student_id, _get_default_workflow(student))
         workflow_result = placement_workflow_agent(workflow_data)
-        
+
         results.append({
             "student_id": student_id,
             "job_applied": workflow_result["job_applied"],
@@ -90,9 +58,30 @@ def list_all_placement_workflows():
             "stage_status": workflow_result["stage_status"],
             "next_action": workflow_result["next_action"]
         })
-    
+
     return {
         "total_students": len(results),
         "placement_workflows": results,
         "message": "All placement workflows retrieved"
+    }
+
+
+@router.post("/placement-workflow/{student_id}/update")
+def update_placement_workflow(student_id: int, stage: str, job_applied: str = None):
+    student = seed_data.get_student(student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
+
+    existing = _WORKFLOWS.get(student_id, _get_default_workflow(student))
+    existing["current_stage"] = stage
+    if job_applied:
+        existing["job_applied"] = job_applied
+    _WORKFLOWS[student_id] = existing
+
+    workflow_result = placement_workflow_agent(existing)
+
+    return {
+        "student_id": student_id,
+        "updated_workflow": workflow_result,
+        "message": f"Workflow updated to stage: {stage}"
     }

@@ -1,117 +1,104 @@
 """
-Role Matching Routes
-API endpoints for role matching recommendations
+Role Matching Agent - CLEANED (No Hardcoding)
+Matches student to suitable roles based on MARKET DATA
 """
 
-from fastapi import APIRouter, HTTPException
-from app.agents.role_matching_agent import role_matching_agent, validate_role_match_result
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from app.data.database import SessionLocal, StudentModel, MarketSkillCacheModel
+import json
 
 router = APIRouter()
-
-# Candidate profiles with readiness scores
-CANDIDATE_PROFILES = {
-    1: {
-        "profile": {
-            "candidate_id": 1,
-            "skills": ["Python", "React", "SQL"],
-            "target_role": "Full Stack Developer"
-        },
-        "readiness_scores": {
-            "skill_gap_score": 65,
-            "portfolio_score": 50,
-            "resume_score": 100,
-            "interview_readiness_score": 70
-        }
-    },
-    2: {
-        "profile": {
-            "candidate_id": 2,
-            "skills": ["Python", "FastAPI", "SQL", "Docker"],
-            "target_role": "Backend Developer"
-        },
-        "readiness_scores": {
-            "skill_gap_score": 85,
-            "portfolio_score": 100,
-            "resume_score": 100,
-            "interview_readiness_score": 80
-        }
-    },
-    3: {
-        "profile": {
-            "candidate_id": 3,
-            "skills": ["Python", "React", "SQL"],
-            "target_role": "Full Stack Developer"
-        },
-        "readiness_scores": {
-            "skill_gap_score": 75,
-            "portfolio_score": 75,
-            "resume_score": 80,
-            "interview_readiness_score": 70
-        }
-    }
-}
-
 
 @router.get("/role-match/{student_id}")
 def get_role_match(student_id: int):
     """
-    Get role matching recommendations for a student.
+    Recommend suitable roles based on student skills vs MARKET DATA (not hardcoded)
     
-    Args:
-        student_id: ID of the student
+    Flow:
+    1. Get student skills
+    2. Query all available role data in market cache
+    3. Calculate fit score for each role
+    4. Sort by fit score
+    5. Return top 3-5 roles
+    """
+    db = SessionLocal()
+    try:
+        # Get student
+        student = db.query(StudentModel).filter(StudentModel.id == student_id).first()
+        if not student:
+            return JSONResponse(status_code=404, content={"detail": "Student not found"})
         
-    Returns:
-        Role matching recommendations with fit scores
-    """
-    
-    if student_id not in CANDIDATE_PROFILES:
-        raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
-    
-    candidate_data = CANDIDATE_PROFILES[student_id]
-    
-    # Run Role Matching Agent
-    role_result = role_matching_agent(
-        candidate_data["profile"],
-        candidate_data["readiness_scores"]
-    )
-    
-    # Validate result
-    validation = validate_role_match_result(role_result)
-    
-    return {
-        "student_id": student_id,
-        "role_match_analysis": role_result,
-        "validation": validation,
-        "message": "Role matching completed successfully"
-    }
-
-
-@router.get("/role-match")
-def list_all_role_matches():
-    """
-    Get role matching recommendations for all students.
-    
-    Returns:
-        List of role recommendations for all students
-    """
-    
-    results = []
-    
-    for student_id in CANDIDATE_PROFILES:
-        candidate_data = CANDIDATE_PROFILES[student_id]
-        role_result = role_matching_agent(
-            candidate_data["profile"],
-            candidate_data["readiness_scores"]
-        )
+        # Parse student skills
+        student_skills = []
+        if student.skills:
+            try:
+                student_skills = json.loads(student.skills) if isinstance(student.skills, str) else student.skills
+            except:
+                student_skills = [s.strip() for s in str(student.skills).split(",")]
         
-        results.append({
+        # Get all unique roles from market data
+        role_data = db.query(MarketSkillCacheModel.target_role).distinct().all()
+        
+        if not role_data:
+            return {
+                "role_matches": [],
+                "message": "No market data yet. Run market fetcher first."
+            }
+        
+        # Calculate fit for each role
+        role_fits = []
+        
+        for (role,) in role_data:
+            if not role:
+                continue
+            
+            # Get market skills for this role
+            market_skills = db.query(MarketSkillCacheModel).filter(
+                MarketSkillCacheModel.target_role == role
+            ).all()
+            
+            if not market_skills:
+                continue
+            
+            # Calculate match score
+            matched_count = 0
+            total_weight = 0
+            
+            for market_skill in market_skills:
+                skill_name = market_skill.skill_name
+                demand_weight = market_skill.demand_weight
+                
+                has_skill = any(
+                    skill_name.lower() in s.lower() or s.lower() in skill_name.lower() 
+                    for s in student_skills
+                )
+                
+                if has_skill:
+                    matched_count += demand_weight
+                
+                total_weight += demand_weight
+            
+            # Calculate fit score (0-100)
+            fit_score = int((matched_count / total_weight * 100)) if total_weight > 0 else 0
+            
+            role_fits.append({
+                "role": role,
+                "fit_score": fit_score,
+                "matched_skills_weight": matched_count,
+                "total_market_weight": total_weight
+            })
+        
+        # Sort by fit score (highest first)
+        role_fits.sort(key=lambda x: x["fit_score"], reverse=True)
+        
+        # Top 5 roles
+        top_roles = role_fits[:5]
+        
+        return {
+            "role_matches": top_roles,
             "student_id": student_id,
-            "top_recommendation": role_result["recommended_roles"][0] if role_result["recommended_roles"] else None,
-            "total_matches": len(role_result["all_matches"])
-        })
-    
-    return {
-        "total_students": len(results),
-        "role_matches": results,
-        "message": "All role matches retrieved"
-    }
+            "total_roles_analyzed": len(role_fits)
+        }
+    finally:
+        db.close()
