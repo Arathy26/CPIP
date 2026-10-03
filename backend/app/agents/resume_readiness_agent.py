@@ -22,6 +22,16 @@ import re
 _METRIC_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*%|\d+\s*\+|\b\d+(?:\.\d+)?\s*[xX]\b")
 
 
+# A "Skills" heading at the start of a line, e.g. "SKILLS", "Technical Skills:",
+# "Core Competencies", "Tech Stack". Detects the SECTION, independent of which
+# skills recruiters have posted.
+_SKILLS_HEADING = re.compile(
+    r"^\s*(technical\s+skills|key\s+skills|core\s+skills|skills|"
+    r"core\s+competencies|tech(?:nical)?\s+stack|technologies)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _clean(skills):
     """Trimmed, lowercase, no empty entries."""
     return {str(s).strip().lower() for s in (skills or []) if s and str(s).strip()}
@@ -62,8 +72,13 @@ def resume_readiness_agent(resume_data, required_skills=None):
         sections_missing.append("Education")
         tips.append("Add your degree/qualification (e.g., B.Tech Computer Science).")
 
-    # ---- Skills -----------------------------------------------------------
-    if resume_data.get("skills") and len(resume_data.get("skills", [])) > 0:
+    # ---- Skills section (resume QUALITY) ------------------------------------
+    # Present if recruiter-known skills were found OR the resume has a Skills
+    # heading. Whether those skills fit the role is judged by Role Alignment,
+    # so a good resume is not penalised just because no jobs are posted yet.
+    has_skill_matches = bool(resume_data.get("skills"))
+    has_skills_heading = bool(_SKILLS_HEADING.search(raw_text))
+    if has_skill_matches or has_skills_heading:
         sections_present.append("Skills")
     else:
         sections_missing.append("Skills")

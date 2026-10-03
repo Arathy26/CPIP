@@ -4,8 +4,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+# tesseract-ocr + poppler-utils: OCR for scanned PDF resumes (pytesseract, pdf2image)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    tesseract-ocr \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements
