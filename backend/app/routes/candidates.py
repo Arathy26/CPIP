@@ -111,13 +111,23 @@ def get_readiness_scores(student_id: int):
     if student is None:
         raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
 
-    scores = seed_data.get_readiness_scores(student_id)
+    # Computed LIVE from the agents (not a stale stored row).
+    # None means "not assessed yet" - never a fake 0.
+    from app.services.orchestrator import collect_agent_outputs, explain
+    ctx = collect_agent_outputs(student_id)
+    explanation = explain(ctx)
     return {
         "student_id": student_id,
-        "skill_gap_score": scores.get("skill_gap_score", 0),
-        "portfolio_score": scores.get("portfolio_score", 0),
-        "resume_score": scores.get("resume_score", 0),
-        "interview_readiness_score": scores.get("interview_readiness_score", 0),
+        **ctx["scores"],
+        "overall_readiness": explanation["overall_readiness_score"],
+        "scores_missing": explanation["scores_missing"],
+        "readiness_band": explanation["readiness_band"],
+        "calculation": {
+            "method": explanation["method"],
+            "formula": explanation["formula"],
+            "breakdown": explanation["breakdown"],
+        },
+        "target_role": ctx["target_role"],
     }
 
 
@@ -237,6 +247,79 @@ def get_role_history(student_id: int):
                 }
                 for h in history
             ]
+        }
+    finally:
+        db.close()
+
+
+class SkillsUpdateRequest(BaseModel):
+    skills: List[str]
+
+
+@router.put("/students/{student_id}/skills")
+def update_student_skills(student_id: int, data: SkillsUpdateRequest):
+    """Student adds/removes skills the resume parser missed. Replaces the list."""
+    db = SessionLocal()
+    try:
+        student = db.query(StudentModel).filter(StudentModel.id == student_id).first()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+        cleaned, seen = [], set()
+        for skill in data.skills:
+            name = (skill or "").strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                cleaned.append(name)
+        student.skills = json.dumps(cleaned)
+        student.updated_at = datetime.utcnow()
+        db.commit()
+        return {"success": True, "student_id": student_id, "skills": cleaned,
+                "message": f"{len(cleaned)} skill(s) saved"}
+    finally:
+        db.close()
+
+
+class PortfolioLinksRequest(BaseModel):
+    github_link: Optional[str] = None
+    linkedin_id: Optional[str] = None
+    deployed_demo_link: Optional[str] = None
+    project_readme_link: Optional[str] = None
+
+
+@router.put("/students/{student_id}/portfolio-links")
+def update_portfolio_links(student_id: int, data: PortfolioLinksRequest):
+    """
+    Student adds or updates their own portfolio evidence links.
+    Only fields that are sent are changed. Send "" to clear a link.
+    """
+    db = SessionLocal()
+    try:
+        student = db.query(StudentModel).filter(StudentModel.id == student_id).first()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        updates = data.dict(exclude_unset=True)
+        if not updates:
+            raise HTTPException(status_code=400, detail="No links provided")
+
+        url_fields = {"github_link", "deployed_demo_link", "project_readme_link"}
+        for field, value in updates.items():
+            value = (value or "").strip()
+            if value and field in url_fields and not value.lower().startswith(("http://", "https://")):
+                raise HTTPException(status_code=400, detail=f"{field} must start with http:// or https://")
+            setattr(student, field, value or None)
+
+        student.updated_at = datetime.utcnow()
+        db.commit()
+
+        return {
+            "success": True,
+            "student_id": student_id,
+            "github_link": student.github_link,
+            "linkedin_id": student.linkedin_id,
+            "deployed_demo_link": student.deployed_demo_link,
+            "project_readme_link": student.project_readme_link,
+            "message": "Portfolio links updated"
         }
     finally:
         db.close()

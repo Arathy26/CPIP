@@ -1,24 +1,39 @@
 import { useState } from 'react';
 
+// Fit categories come from the backend recruiter_matching_agent (MATCHING_RULES).
 const TIER_STYLES = {
-  'Excellent Fit': { badge: 'bg-emerald-100 text-emerald-800', bar: 'bg-emerald-500' },
-  'Good Fit': { badge: 'bg-blue-100 text-blue-800', bar: 'bg-blue-500' },
-  'Possible Fit': { badge: 'bg-amber-100 text-amber-800', bar: 'bg-amber-500' },
-  'Not Suitable Yet': { badge: 'bg-gray-100 text-gray-700', bar: 'bg-gray-400' },
-  'Perfect Match': { badge: 'bg-emerald-100 text-emerald-800', bar: 'bg-emerald-500' },
-  'High Match': { badge: 'bg-blue-100 text-blue-800', bar: 'bg-blue-500' },
-  'Medium Match': { badge: 'bg-amber-100 text-amber-800', bar: 'bg-amber-500' },
-  'Low Match': { badge: 'bg-gray-100 text-gray-700', bar: 'bg-gray-400' },
+  'Strong Fit': 'bg-emerald-100 text-emerald-800',
+  'Good Fit': 'bg-blue-100 text-blue-800',
+  'Stretch Fit': 'bg-amber-100 text-amber-800',
+  'Not Suitable Yet': 'bg-gray-100 text-gray-700',
 };
+
+function SkillChips({ label, skills, tone }) {
+  if (!skills || skills.length === 0) return null;
+  const styles = {
+    have: 'bg-green-100 text-green-800',
+    missing: 'bg-amber-100 text-amber-800',
+  };
+  return (
+    <div>
+      <p className="text-xs text-gray-500 mb-1">{label}</p>
+      <div className="flex flex-wrap gap-2">
+        {skills.map((s) => (
+          <span key={s} className={`text-xs px-2 py-1 rounded-full font-medium ${styles[tone]}`}>
+            {tone === 'have' ? '✓' : '⚠'} {s}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function JobMatchCard({ match }) {
   const [open, setOpen] = useState(false);
-  const style = TIER_STYLES[match.suitability] || TIER_STYLES['Not Suitable Yet'];
+  const badge = TIER_STYLES[match.fit_category] || TIER_STYLES['Not Suitable Yet'];
 
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden mb-3">
-
-      {/* Header */}
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -31,126 +46,61 @@ export default function JobMatchCard({ match }) {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <span className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${style.badge}`}>
-            {match.suitability}
+          <span className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${badge}`}>
+            {match.fit_category}
           </span>
           <span className="text-lg font-bold text-gray-900">{match.fit_score}%</span>
           <svg
             className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`}
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
+            fill="none" viewBox="0 0 24 24" stroke="currentColor"
           >
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
           </svg>
         </div>
       </button>
 
-      {/* Expanded */}
       {open && (
         <div className="border-t border-gray-100 px-5 py-4 space-y-4">
-
-          {/* Job info */}
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">
-  <p><span className="text-gray-400">Company:</span> {match.company_name || 'Unknown'}</p>
-  <p><span className="text-gray-400">Location:</span> {match.location}</p>
-  <p>
-    <span className="text-gray-400">Work Type:</span>{' '}
-    {match.is_remote ? (
-      <span className="text-green-600 font-medium">🏠 Remote</span>
-    ) : (
-      <span className="text-blue-600 font-medium">🏢 On-site</span>
-    )}
-  </p>
-  <p>
-    <span className="text-gray-400">Type:</span>{' '}
-    {match.employment_type || 'Full-time'}
-  </p>
-</div>
+            <p><span className="text-gray-400">Company:</span> {match.company_name}</p>
+            <p><span className="text-gray-400">Location:</span> {match.location}</p>
+            <p><span className="text-gray-400">Type:</span> {match.employment_type || 'Not specified'}</p>
+            <p><span className="text-gray-400">Experience:</span> {match.experience_level || 'Not specified'}</p>
+            {match.salary_range && (
+              <p><span className="text-gray-400">Salary:</span> {match.salary_range}</p>
+            )}
+          </div>
 
-          {/* Agent scores */}
-          {match.agent_scores && (
+          {match.reason && (
             <div className="bg-blue-50 rounded-lg p-3">
-              <p className="text-xs font-semibold tracking-wide text-blue-800 mb-2">
-                READINESS SCORES
-              </p>
-              <div className="grid grid-cols-2 gap-2 text-sm text-blue-900">
-                <span>Skill Gap: <strong>{match.agent_scores.skill_gap}/100</strong></span>
-                <span>Portfolio: <strong>{match.agent_scores.portfolio}/100</strong></span>
-                <span>Resume: <strong>{match.agent_scores.resume}/100</strong></span>
-                <span>Interview: <strong>{match.agent_scores.interview}/100</strong></span>
-              </div>
+              <p className="text-xs font-semibold tracking-wide text-blue-800 mb-1">WHY THIS ROLE MATCHES</p>
+              <p className="text-sm text-blue-900">{match.reason}</p>
             </div>
           )}
 
-          {/* Skill coverage */}
-          {match.skill_coverage && (
-            <div>
-              <p className="text-xs font-semibold tracking-wide text-gray-500 mb-2">
-                SKILL COVERAGE
-              </p>
-              <div className="flex gap-4 text-sm">
-                <span className="text-green-700">
-                  Required: <strong>{match.skill_coverage.required_percent}%</strong>
-                </span>
-                <span className="text-blue-700">
-                  Preferred: <strong>{match.skill_coverage.preferred_percent}%</strong>
-                </span>
-              </div>
+          <div>
+            <p className="text-xs font-semibold tracking-wide text-gray-500 mb-2">SKILL COVERAGE</p>
+            <div className="flex gap-4 text-sm mb-3">
+              <span className="text-green-700">Required: <strong>{match.required_coverage_percent}%</strong></span>
+              {match.preferred_skills?.length > 0 && (
+                <span className="text-blue-700">Preferred: <strong>{match.preferred_coverage_percent}%</strong></span>
+              )}
             </div>
-          )}
-
-          {/* Required skills */}
-          {match.required_skills?.length > 0 && (
-            <div>
-              <p className="text-xs font-semibold tracking-wide text-gray-500 mb-2">
-                REQUIRED SKILLS
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {match.required_skills.map((s, i) => (
-                  <span
-                    key={i}
-                    className="px-2 py-1 rounded bg-gray-50 text-gray-700 text-xs font-medium border"
-                  >
-                    {s}
-                  </span>
-                ))}
-              </div>
+            <div className="space-y-3">
+              <SkillChips label="Required skills you have" skills={match.matched_required_skills} tone="have" />
+              <SkillChips label="Required skills to build" skills={match.missing_required_skills} tone="missing" />
+              <SkillChips label="Preferred skills you have" skills={match.matched_preferred_skills} tone="have" />
+              <SkillChips label="Preferred skills to build" skills={match.missing_preferred_skills} tone="missing" />
             </div>
+          </div>
+
+          {match.description && (
+            <p className="text-sm text-gray-600 whitespace-pre-line">{match.description}</p>
           )}
 
-          {/* Resume quality */}
-          {match.resume_score !== undefined && (
-            <div className="bg-purple-50 rounded-lg p-3">
-              <p className="text-xs font-semibold tracking-wide text-purple-800 mb-2">
-                RESUME QUALITY FOR THIS JOB
-              </p>
-              <div className="flex gap-4 text-sm text-purple-900 mb-2">
-                <span>Resume score: <strong>{match.resume_score}/100</strong></span>
-                {match.resume_keyword_match_percent != null && (
-                  <span>Keyword match: <strong>{match.resume_keyword_match_percent}%</strong></span>
-                )}
-              </div>
-              {match.resume_tips?.slice(0, 2).map((tip, i) => (
-                <p key={i} className="text-sm text-purple-700 mt-1">⚠ {tip}</p>
-              ))}
-            </div>
-          )}
-
-          {/* Apply button */}
-          {match.apply_link ? (
-            
-             <a href={match.apply_link}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block w-full text-center bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 rounded-xl transition-colors"
-            >
-              Apply Now →
-            </a>
-          ) : (
-            <p className="text-sm text-gray-400 text-center">No apply link available</p>
-          )}
-
+          <p className="text-xs text-gray-400">
+            Posted on CPIP by {match.posted_by || 'Recruiter'}. This is a fit recommendation, not a selection decision.
+          </p>
         </div>
       )}
     </div>

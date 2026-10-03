@@ -1,437 +1,455 @@
 """
-Job Opportunity Routes - With Location+Role Job Caching
-Cache strategy:
-  1. Check DB for cached jobs for this location+role
-  2. If found and fresh (< 24hrs) → return from DB
-  3. If not found → call Adzuna → save to DB → return
+Job Opportunity Routes — Recruiter-Posted Jobs Only
+===================================================
+Jobs enter CPIP only through recruiters:
+  - POST /api/jobs        single posting
+  - POST /api/jobs/bulk   bulk upload (CSV), validated row by row
+No external job APIs.
+
+Matching uses ONE agent (recruiter_matching_agent) in both directions:
+  - GET /api/jobs/{job_id}/candidates   recruiter side
+  - GET /api/job-match/{student_id}     candidate side ("Matching Roles")
 """
 
+import csv
+import io
+import json
 import logging
-from fastapi import APIRouter, HTTPException
-from datetime import datetime, timedelta
 from typing import List, Optional
-from pydantic import BaseModel, Field
 
-from app.agents.job_opportunity_agent import (
-    job_opportunity_agent,
-    match_candidates_to_job,
-    validate_job_match_result,
-)
-from app.agents.resume_readiness_agent import resume_readiness_agent
-from app.data import seed_data
-from app.data.database import SessionLocal
-from app.services.external_jobs_service import (
-    search_external_jobs,
-    ExternalJobsConfigError,
-    ExternalJobsRequestError,
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field, field_validator
+
+from app.data.database import AuditLogModel, JobPostingModel, SessionLocal, StudentModel
+from app.services.recruiter_matching_agent import (
+    MATCHING_RULES,
+    match_candidates_for_job,
+    match_jobs_for_student,
+    parse_skills,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-CACHE_TTL_HOURS = 24  # Jobs cache valid for 24 hours
+# Columns accepted in a bulk upload file. Required columns must be present
+# and non-empty on every row.
+BULK_REQUIRED_COLUMNS = ["job_title", "company_name", "location", "required_skills"]
+BULK_OPTIONAL_COLUMNS = [
+    "preferred_skills", "description", "experience_level",
+    "employment_type", "salary_range", "posted_by",
+]
 
 
-# ── Job Cache helpers ──────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────
 
-def get_cached_jobs_for_location_role(location: str, role: str):
-    """Check DB for cached jobs for this location+role combination"""
-    try:
-        from app.data.database import JobDescriptionCacheModel
-        db = SessionLocal()
-        cutoff = datetime.utcnow() - timedelta(hours=CACHE_TTL_HOURS)
-        
-        # Use job_description_cache with location+role as composite key
-        cache_key = f"{location.lower().strip()}::{role.lower().strip()}"
-        
-        cached = db.query(JobDescriptionCacheModel).filter(
-            JobDescriptionCacheModel.job_id == cache_key,
-            JobDescriptionCacheModel.cached_at > cutoff
-        ).first()
-        
-        db.close()
-        
-        if cached and cached.skills_extracted:
-            import json
-            jobs = json.loads(cached.skills_extracted)
-            print(f"✅ Cache HIT: {len(jobs)} jobs for {location}/{role}")
-            return jobs
-        
-        print(f"❌ Cache MISS: {location}/{role}")
-        return None
-    except Exception as e:
-        print(f"⚠️ Cache read error: {e}")
-        return None
-
-
-def save_jobs_to_cache(location: str, role: str, jobs: list):
-    """Save fetched jobs to DB cache"""
-    try:
-        from app.data.database import JobDescriptionCacheModel
-        import json
-        db = SessionLocal()
-        
-        cache_key = f"{location.lower().strip()}::{role.lower().strip()}"
-        
-        existing = db.query(JobDescriptionCacheModel).filter(
-            JobDescriptionCacheModel.job_id == cache_key
-        ).first()
-        
-        if existing:
-            existing.skills_extracted = json.dumps(jobs)
-            existing.cached_at = datetime.utcnow()
-        else:
-            new_cache = JobDescriptionCacheModel(
-                job_id=cache_key,
-                title=f"Jobs cache: {role} in {location}",
-                company="cache",
-                description=f"{location}::{role}",
-                skills_extracted=json.dumps(jobs),
-                cached_at=datetime.utcnow()
-            )
-            db.add(new_cache)
-        
-        db.commit()
-        db.close()
-        print(f"✅ Saved {len(jobs)} jobs to cache for {location}/{role}")
-    except Exception as e:
-        print(f"⚠️ Cache save error: {e}")
-
-
-# ── Helper functions ───────────────────────────────────────────────
-
-def _build_profile_and_scores(student):
-    profile = {
-        "candidate_id": student["id"],
-        "name": student["name"],
-        "skills": student["skills"],
-        "cgpa": student["cgpa"],
-        "degree": student["degree"],
-        "target_role": student.get("target_role"),
+def _job_to_dict(job: JobPostingModel):
+    return {
+        "id": job.id,
+        "title": job.title,
+        "company_name": job.company_name,
+        "location": job.location,
+        "required_skills": parse_skills(job.required_skills),
+        "preferred_skills": parse_skills(job.preferred_skills),
+        "description": job.description,
+        "min_cgpa": job.min_cgpa,
+        "experience_level": job.experience_level,
+        "employment_type": job.employment_type,
+        "salary_range": job.salary_range,
+        "posted_by": job.posted_by,
+        "is_active": job.is_active,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
     }
-    readiness_scores = seed_data.get_readiness_scores(student["id"])
-    resume_data = seed_data.get_resume(student["id"])
-    raw_resume_text = resume_data.get("raw_text", "") if resume_data else ""
-    return profile, readiness_scores, raw_resume_text
 
 
-def _enrich_with_resume_quality(matches, student_id):
-    resume_data = seed_data.get_resume(student_id)
-    if resume_data is None:
-        return matches
-    for match in matches:
-        job_required_skills = match.get("required_skills", [])
-        resume_check = resume_readiness_agent(resume_data, required_skills=job_required_skills)
-        match["resume_score"] = resume_check["resume_score"]
-        match["resume_keyword_match_percent"] = resume_check["keyword_match_percent"]
-        match["resume_has_metrics"] = "Quantified Impact" in resume_check["sections_present"]
-        match["resume_tips"] = resume_check.get("improvement_tips", [])
-    return matches
-
-
-def _calculate_fit_score(candidate, job, readiness_scores):
+def _write_audit(db, event_type: str, details: dict, student_id: Optional[int] = None):
+    """Record a decision trail entry. Never blocks the main action."""
     try:
-        skill_gap_score = readiness_scores.get("skill_gap_score", 0)
-        portfolio_score = readiness_scores.get("portfolio_score", 0)
-        resume_score = readiness_scores.get("resume_score", 0)
-        interview_score = readiness_scores.get("interview_readiness_score", 0)
+        details = {**details, "rules_version": MATCHING_RULES["version"]}
+        db.add(AuditLogModel(
+            student_id=student_id,
+            event_type=event_type,
+            details=json.dumps(details, default=str),
+        ))
+        db.commit()
+    except Exception as exc:  # audit failure must not lose the posting
+        db.rollback()
+        logger.error("Audit write failed for %s: %s", event_type, exc)
 
-        candidate_skills = set(s.lower() for s in candidate.get("skills", []))
-        job_required_skills = set(s.lower() for s in job.get("required_skills", []))
-        job_preferred_skills = set(s.lower() for s in job.get("preferred_skills", []))
 
-        required_match = len(candidate_skills & job_required_skills) / len(job_required_skills) if job_required_skills else 0.5
-        preferred_match = len(candidate_skills & job_preferred_skills) / len(job_preferred_skills) if job_preferred_skills else 0.5
+def _audit_summary(matches):
+    return [
+        {"student_id": m["student_id"], "fit_score": m["fit_score"], "fit_category": m["fit_category"]}
+        for m in matches
+    ]
 
-        fit_score = int(
-            (required_match * 35) +
-            (skill_gap_score * 0.15) +
-            (portfolio_score * 0.12) +
-            (resume_score * 0.13) +
-            (interview_score * 0.15) +
-            (preferred_match * 10)
+
+def _clean_skill_list(values: List[str]) -> List[str]:
+    seen, cleaned = set(), []
+    for v in values:
+        s = str(v).strip()
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            cleaned.append(s)
+    return cleaned
+
+
+# ── Request models ────────────────────────────────────────────────
+
+class JobPostRequest(BaseModel):
+    title: str
+    company_name: str
+    location: str
+    required_skills: List[str]
+    preferred_skills: List[str] = Field(default_factory=list)
+    min_cgpa: Optional[float] = 0
+    experience_level: Optional[str] = "Fresher"
+    employment_type: Optional[str] = "Full-Time"
+    description: Optional[str] = None
+    salary_range: Optional[str] = None
+    posted_by: Optional[str] = "Recruiter"
+
+    @field_validator("title", "company_name", "location")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be empty")
+        return v.strip()
+
+    @field_validator("required_skills")
+    @classmethod
+    def needs_required_skills(cls, v: List[str]) -> List[str]:
+        cleaned = _clean_skill_list(v)
+        if not cleaned:
+            raise ValueError("at least one required skill is needed for matching")
+        return cleaned
+
+    @field_validator("preferred_skills")
+    @classmethod
+    def clean_preferred(cls, v: List[str]) -> List[str]:
+        return _clean_skill_list(v)
+
+    @field_validator("min_cgpa")
+    @classmethod
+    def cgpa_range(cls, v: Optional[float]) -> float:
+        v = v or 0
+        if v < 0 or v > 10:
+            raise ValueError("min_cgpa must be between 0 and 10")
+        return v
+
+
+class JobUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    company_name: Optional[str] = None
+    location: Optional[str] = None
+    required_skills: Optional[List[str]] = None
+    preferred_skills: Optional[List[str]] = None
+    min_cgpa: Optional[float] = None
+    experience_level: Optional[str] = None
+    employment_type: Optional[str] = None
+    description: Optional[str] = None
+    salary_range: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+def _create_job(db, data: JobPostRequest) -> JobPostingModel:
+    job = JobPostingModel(
+        title=data.title,
+        company_name=data.company_name,
+        location=data.location,
+        required_skills=json.dumps(data.required_skills),
+        preferred_skills=json.dumps(data.preferred_skills),
+        min_cgpa=data.min_cgpa,
+        experience_level=data.experience_level,
+        employment_type=data.employment_type,
+        description=data.description,
+        salary_range=data.salary_range,
+        posted_by=data.posted_by,
+        is_active=True,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+# ── Recruiter: post a single job ──────────────────────────────────
+
+@router.post("/jobs")
+def post_job(job: JobPostRequest):
+    db = SessionLocal()
+    try:
+        new_job = _create_job(db, job)
+        students = db.query(StudentModel).all()
+        matches = match_candidates_for_job(new_job, students)
+
+        _write_audit(db, "JobPostedAndMatched", {
+            "job_id": new_job.id,
+            "source": "single",
+            "matched_candidates": _audit_summary(matches),
+        })
+
+        return {
+            "job": _job_to_dict(new_job),
+            "auto_matched_candidates": matches,
+            "message": f"Job '{new_job.title}' posted. {len(matches)} candidate(s) matched.",
+        }
+    finally:
+        db.close()
+
+
+# ── Recruiter: bulk upload (CSV) ──────────────────────────────────
+
+@router.post("/jobs/bulk")
+async def bulk_upload_jobs(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Upload a .csv file")
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded CSV")
+
+    reader = csv.DictReader(io.StringIO(text))
+    headers = [h.strip() for h in (reader.fieldnames or [])]
+    missing_cols = [c for c in BULK_REQUIRED_COLUMNS if c not in headers]
+    if missing_cols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required column(s): {', '.join(missing_cols)}. "
+                   f"Required: {', '.join(BULK_REQUIRED_COLUMNS)}. "
+                   f"Optional: {', '.join(BULK_OPTIONAL_COLUMNS)}.",
         )
 
-        fit_score = min(100, max(0, fit_score))
+    db = SessionLocal()
+    try:
+        students = db.query(StudentModel).all()
+        created, errors = [], []
 
-        if fit_score >= 80:
-            suitability = "Excellent Fit"
-        elif fit_score >= 60:
-            suitability = "Good Fit"
-        elif fit_score >= 40:
-            suitability = "Possible Fit"
-        else:
-            suitability = "Not Suitable Yet"
+        # Row 1 is the header, so data starts at row 2 (matches Excel numbering).
+        for row_number, row in enumerate(reader, start=2):
+            row = {(k or "").strip(): (v or "").strip() for k, v in row.items()}
+            if not any(row.values()):
+                continue  # skip blank lines
+            try:
+                payload = JobPostRequest(
+                    title=row.get("job_title", ""),
+                    company_name=row.get("company_name", ""),
+                    location=row.get("location", ""),
+                    required_skills=row.get("required_skills", "").split(","),
+                    preferred_skills=row.get("preferred_skills", "").split(","),
+                    min_cgpa=float(row["min_cgpa"]) if row.get("min_cgpa") else 0,
+                    experience_level=row.get("experience_level") or "Fresher",
+                    employment_type=row.get("employment_type") or "Full-Time",
+                    description=row.get("description") or None,
+                    salary_range=row.get("salary_range") or None,
+                    posted_by=row.get("posted_by") or "Recruiter",
+                )
+            except ValueError as exc:
+                # pydantic ValidationError and float() errors are both ValueError
+                errors.append({"row": row_number, "job_title": row.get("job_title", ""),
+                               "error": _short_error(exc)})
+                continue
 
-        return fit_score, suitability, required_match, preferred_match
+            job = _create_job(db, payload)
+            matches = match_candidates_for_job(job, students)
+            created.append({**_job_to_dict(job), "matched_candidates_count": len(matches)})
+            _write_audit(db, "JobPostedAndMatched", {
+                "job_id": job.id,
+                "source": "bulk",
+                "file_name": file.filename,
+                "row": row_number,
+                "matched_candidates": _audit_summary(matches),
+            })
 
-    except Exception as e:
-        logger.error(f"Error calculating fit score: {e}")
-        return 0, "Error", 0, 0
+        _write_audit(db, "BulkJobUpload", {
+            "file_name": file.filename,
+            "saved_count": len(created),
+            "error_count": len(errors),
+            "errors": errors,
+        })
+
+        return {
+            "saved_count": len(created),
+            "error_count": len(errors),
+            "jobs": created,
+            "errors": errors,
+            "message": f"{len(created)} job(s) saved, {len(errors)} row(s) rejected.",
+        }
+    finally:
+        db.close()
 
 
-# ── Main job match endpoint ────────────────────────────────────────
+def _short_error(exc: Exception) -> str:
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        parts = []
+        for e in errors():
+            field = ".".join(str(p) for p in e.get("loc", []))
+            msg = e.get("msg", "").replace("Value error, ", "")
+            parts.append(f"{field}: {msg}" if field else msg)
+        return "; ".join(parts)
+    return f"min_cgpa: {exc}" if "float" in str(exc) else str(exc)
+
+
+# ── List jobs ──────────────────────────────────────────────────────
+
+@router.get("/jobs")
+def list_jobs(include_closed: bool = False):
+    db = SessionLocal()
+    try:
+        query = db.query(JobPostingModel)
+        if not include_closed:
+            query = query.filter(JobPostingModel.is_active == True)
+        jobs = query.order_by(JobPostingModel.created_at.desc()).all()
+        return {"total": len(jobs), "jobs": [_job_to_dict(j) for j in jobs]}
+    finally:
+        db.close()
+
+
+# ── Recruiter: edit / close a job ─────────────────────────────────
+
+@router.patch("/jobs/{job_id}")
+def update_job(job_id: int, req: JobUpdateRequest):
+    db = SessionLocal()
+    try:
+        job = db.query(JobPostingModel).filter(JobPostingModel.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        changes = req.model_dump(exclude_unset=True)
+        for field in ("title", "company_name", "location"):
+            if field in changes and not (changes[field] or "").strip():
+                raise HTTPException(status_code=422, detail=f"{field} must not be empty")
+        if "required_skills" in changes:
+            cleaned = _clean_skill_list(changes["required_skills"] or [])
+            if not cleaned:
+                raise HTTPException(status_code=422, detail="at least one required skill is needed")
+            changes["required_skills"] = json.dumps(cleaned)
+        if "preferred_skills" in changes:
+            changes["preferred_skills"] = json.dumps(_clean_skill_list(changes["preferred_skills"] or []))
+        if "min_cgpa" in changes and changes["min_cgpa"] is not None and not 0 <= changes["min_cgpa"] <= 10:
+            raise HTTPException(status_code=422, detail="min_cgpa must be between 0 and 10")
+
+        for field, value in changes.items():
+            setattr(job, field, value)
+        db.commit()
+        db.refresh(job)
+
+        _write_audit(db, "JobUpdated", {"job_id": job.id, "changed_fields": list(changes.keys())})
+        return {"job": _job_to_dict(job)}
+    finally:
+        db.close()
+
+
+@router.delete("/jobs/{job_id}")
+def close_job(job_id: int):
+    """Closes the posting (kept for audit history). Candidates stop seeing it."""
+    db = SessionLocal()
+    try:
+        job = db.query(JobPostingModel).filter(JobPostingModel.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        job.is_active = False
+        db.commit()
+        _write_audit(db, "JobClosed", {"job_id": job.id})
+        return {"message": f"Job '{job.title}' closed. It is no longer shown to candidates."}
+    finally:
+        db.close()
+
+
+# ── Recruiter side: matching candidates for a job ─────────────────
+
+@router.get("/jobs/{job_id}/candidates")
+def get_matched_candidates_for_job(job_id: int):
+    db = SessionLocal()
+    try:
+        job = db.query(JobPostingModel).filter(JobPostingModel.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        students = db.query(StudentModel).all()
+        matches = match_candidates_for_job(job, students)
+        return {
+            "job_id": job_id,
+            "job_title": job.title,
+            "total_matched": len(matches),
+            "candidates": matches,
+            "rules_version": MATCHING_RULES["version"],
+        }
+    finally:
+        db.close()
+
+
+# ── Candidate side: matching roles for a student ──────────────────
 
 @router.get("/job-match/{student_id}")
-def get_job_matches(student_id: int, location: str = None):
+def get_job_matches(student_id: int, location: Optional[str] = None):
+    db = SessionLocal()
     try:
-        candidate = seed_data.get_student(student_id)
-        if not candidate:
+        student = db.query(StudentModel).filter(StudentModel.id == student_id).first()
+        if not student:
             raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
 
-        profile, readiness_scores, resume_text = _build_profile_and_scores(candidate)
-        target_role = candidate.get("target_role", "")
+        open_jobs = db.query(JobPostingModel).filter(JobPostingModel.is_active == True).all()
+        matches = match_jobs_for_student(student, open_jobs)
 
-        # Determine search location
-        search_location = location or candidate.get("location")
-        if not search_location or search_location.lower() in ["not specified", "remote", ""]:
-            return {
-                "student_id": student_id,
-                "job_match_analysis": {
-                    "all_matches": [],
-                    "suitable_jobs": [],
-                    "recommendation_count": 0,
-                    "recommendation_summary": "Please enter your preferred job location.",
-                    "needs_location": True
-                },
-                "validation": {"valid": True, "message": "Location required"},
-                "message": "Location required for job matching"
-            }
-
-        all_jobs = []
-
-        # ── CACHE-FIRST JOB FETCHING ──────────────────────────────
-        if target_role:
-            cached_listings = get_cached_jobs_for_location_role(search_location, target_role)
-
-            if cached_listings:
-                # Use cached jobs — no API call needed
-                external_listings = cached_listings
-                print(f"📦 Using {len(external_listings)} cached jobs")
-            else:
-                # Call Adzuna API
-                print(f"🌐 Fetching from Adzuna: {target_role} in {search_location}")
-                try:
-                    external_listings = search_external_jobs(
-                        query=target_role,
-                        location=search_location,
-                        max_results=20
-                    )
-                    # Save raw listings to cache for next time
-                    if external_listings:
-                        save_jobs_to_cache(search_location, target_role, external_listings)
-                except Exception as e:
-                    logger.error(f"Adzuna fetch failed: {e}")
-                    external_listings = []
-
-            # Build job objects from listings
-            for listing in external_listings:
-                cached_desc = seed_data.get_cached_job_description(
-                    listing.get("job_id")
-                ) if listing.get("job_id") else None
-                required_skills = cached_desc["skills_extracted"] if cached_desc else []
-
-                all_jobs.append({
-                    "id": listing.get("job_id", ""),
-                    "job_title": listing.get("title", ""),
-                    "company_name": listing.get("company", "Unknown"),
-                    "location": listing.get("location", search_location),
-                    "required_skills": required_skills,
-                    "preferred_skills": [],
-                    "min_cgpa": 0,
-                    "min_readiness": 0,
-                    "apply_link": listing.get("apply_link", ""),
-                    "source": listing.get("source", "external"),
-                    "is_remote": listing.get("is_remote", False),
-                    "employment_type": listing.get("employment_type", "Full-time"),
-                })
-
-        # Add internal DB jobs
-        internal_jobs = seed_data.get_all_jobs() or []
-        try:
-            from app.services.semantic_skill_matcher import get_matcher
-            matcher = get_matcher()
-            for job in internal_jobs:
-                job_title = job.get("job_title", "")
-                if matcher and matcher.model:
-                    similarity = matcher.semantic_match(target_role.lower(), job_title.lower())
-                    if similarity >= 0.4:
-                        all_jobs.append(job)
-                else:
-                    target_words = set(target_role.lower().split())
-                    title_words = set(job_title.lower().split())
-                    if target_words & title_words:
-                        all_jobs.append(job)
-        except Exception as e:
-            logger.error(f"Internal job matching failed: {e}")
-            all_jobs.extend(internal_jobs)
-
-        # Calculate fit scores
-        matches = []
-        for job in all_jobs:
-            fit_score, suitability, req_match, pref_match = _calculate_fit_score(
-                candidate, job, readiness_scores
-            )
-
-            eligible = True
-            eligibility_notes = []
-
-            if candidate.get("cgpa", 0) < job.get("min_cgpa", 0):
-                eligible = False
-                eligibility_notes.append("CGPA too low")
-
-            overall_readiness = int((
-                readiness_scores.get("skill_gap_score", 0) +
-                readiness_scores.get("portfolio_score", 0) +
-                readiness_scores.get("resume_score", 0) +
-                readiness_scores.get("interview_readiness_score", 0)
-            ) / 4)
-
-            if overall_readiness < job.get("min_readiness", 0):
-                eligible = False
-                eligibility_notes.append("Readiness too low")
-
-            if fit_score >= 30:
-                matches.append({
-                    "job_id": job.get("id"),
-                    "job_title": job.get("job_title", ""),
-                    "company_name": job.get("company_name", "Unknown"),
-                    "location": job.get("location", search_location),
-                    "apply_link": job.get("apply_link", ""),
-                    "source": job.get("source", "external"),
-                    "is_remote": job.get("is_remote", False),
-                    "employment_type": job.get("employment_type", "Full-time"),
-                    "fit_score": fit_score,
-                    "suitability": suitability,
-                    "eligible": eligible,
-                    "eligibility_notes": eligibility_notes,
-                    "required_skills": job.get("required_skills", []),
-                    "preferred_skills": job.get("preferred_skills", []),
-                    "skill_coverage": {
-                        "required_percent": int(req_match * 100),
-                        "preferred_percent": int(pref_match * 100),
-                    },
-                    "agent_scores": {
-                        "skill_gap": readiness_scores.get("skill_gap_score", 0),
-                        "portfolio": readiness_scores.get("portfolio_score", 0),
-                        "resume": readiness_scores.get("resume_score", 0),
-                        "interview": readiness_scores.get("interview_readiness_score", 0),
-                    }
-                })
-
-        matches = _enrich_with_resume_quality(matches, student_id)
-        matches.sort(key=lambda x: x["fit_score"], reverse=True)
-        suitable_jobs = [m for m in matches if m["eligible"]][:5]
+        _write_audit(db, "MatchingRolesViewed", {
+            "open_jobs_evaluated": len(open_jobs),
+            "matches": [
+                {"job_id": m["job_id"], "fit_score": m["fit_score"], "fit_category": m["fit_category"]}
+                for m in matches
+            ],
+        }, student_id=student_id)
 
         return {
             "student_id": student_id,
             "job_match_analysis": {
-                "candidate_id": student_id,
                 "all_matches": matches,
-                "suitable_jobs": suitable_jobs,
-                "recommendation_count": len(suitable_jobs),
-                "location_searched": search_location,
+                "suitable_jobs": matches,
+                "open_jobs_evaluated": len(open_jobs),
+                "recommendation_count": len(matches),
                 "recommendation_summary": (
-                    f"Found {len(suitable_jobs)} suitable job(s) in {search_location}"
-                    if suitable_jobs else
-                    "No suitable jobs found. Recommend skill improvement."
+                    f"{len(matches)} posted role(s) match your profile"
+                    if matches else
+                    "No matching roles yet. New roles appear here when recruiters post jobs that fit your skills."
                 ),
             },
-            "validation": {"valid": True, "message": "Job matching completed successfully"},
-            "message": "Job matching completed successfully"
+            "rules_version": MATCHING_RULES["version"],
+            "message": "Job matching completed successfully",
         }
-
-    except Exception as e:
-        logger.error(f"Error in job matching: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Job matching error: {str(e)}")
+    finally:
+        db.close()
 
 
 @router.get("/job-match")
 def list_all_job_matches():
+    db = SessionLocal()
     try:
-        results = []
-        for student in seed_data.get_all_students():
-            student_id = student["id"]
-            match_data = get_job_matches(student_id)
-            results.append({
-                "student_id": student_id,
-                "target_role": student.get("target_role"),
-                "suitable_jobs_count": len(match_data["job_match_analysis"]["suitable_jobs"]),
-            })
-        return {"total_students": len(results), "job_matches": results, "message": "All job matches retrieved"}
-    except Exception as e:
-        logger.error(f"Error retrieving all job matches: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        students = db.query(StudentModel).all()
+        open_jobs = db.query(JobPostingModel).filter(JobPostingModel.is_active == True).all()
+        results = [
+            {
+                "student_id": s.id,
+                "target_role": s.target_role,
+                "suitable_jobs_count": len(match_jobs_for_student(s, open_jobs)),
+            }
+            for s in students
+        ]
+        return {"total_students": len(results), "job_matches": results}
+    finally:
+        db.close()
 
 
-class JobPostRequest(BaseModel):
-    job_title: str
-    company_name: str = "Unknown"
-    location: str = "Remote"
-    required_skills: List[str] = Field(default_factory=list)
-    preferred_skills: List[str] = Field(default_factory=list)
-    min_cgpa: Optional[float] = 0
-    min_readiness: Optional[int] = 0
-    experience_level: Optional[str] = None
-
-
-@router.post("/jobs")
-def post_job(job: JobPostRequest):
-    new_job = seed_data.add_job(job.model_dump())
-    return {"job": new_job, "message": f"Job '{new_job['job_title']}' posted successfully."}
-
-
-@router.get("/jobs")
-def list_jobs(query: str = None):
-    jobs = seed_data.get_all_jobs()
-    if query:
-        jobs = seed_data.search_jobs(jobs, query)
-    return {"jobs": jobs}
-
-
-@router.get("/jobs/external/search")
-def search_jobs_external(query: str, student_id: int = None, country: str = "in"):
-    try:
-        results = search_external_jobs(query, location="India")
-    except ExternalJobsConfigError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except ExternalJobsRequestError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-    if student_id is not None:
-        student = seed_data.get_student(student_id)
-        if student is not None:
-            candidate_skills = set(s.lower() for s in student.get("skills", []))
-            for job in results:
-                required = set(t.lower() for t in job.get("required_technologies", []))
-                matched = candidate_skills & required
-                job["skills_matched"] = list(matched)
-                job["skill_overlap_percent"] = (
-                    int((len(matched) / len(required)) * 100) if required else None
-                )
-
-    return {"query": query, "total_results": len(results), "jobs": results, "message": "External listings via Adzuna"}
-
-
-@router.get("/jobs/{job_id}/matches")
-def get_job_candidate_matches(job_id: int):
-    job = seed_data.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    return {"job_id": job_id, "job_title": job["job_title"], "message": "Candidate matching coming soon"}
-
+# ── Student notifications (placeholder, unchanged) ────────────────
 
 @router.get("/notifications/{student_id}")
 def get_student_notifications(student_id: int):
-    student = seed_data.get_student(student_id)
-    if student is None:
-        raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
-    return {"student_id": student_id, "notifications": [], "unread_count": 0}
-
-
-@router.post("/notifications/{notification_id}/read")
-def mark_notification_as_read(notification_id: int):
-    notification = seed_data.mark_notification_read(notification_id)
-    if notification is None:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    return {"notification": notification, "message": "Marked as read"}
+    db = SessionLocal()
+    try:
+        student = db.query(StudentModel).filter(StudentModel.id == student_id).first()
+        if not student:
+            raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
+        return {"student_id": student_id, "notifications": [], "unread_count": 0}
+    finally:
+        db.close()

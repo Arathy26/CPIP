@@ -20,10 +20,10 @@ engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
     echo=False,
-    pool_pre_ping=True,        # ← tests connection before using it
-    pool_recycle=300,          # ← recycles connections every 5 minutes
-    pool_size=5,               # ← max 5 connections
-    max_overflow=10            # ← allow 10 extra connections under load
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=5,
+    max_overflow=10
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -38,9 +38,31 @@ def get_db():
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
     print("Database tables created successfully!")
 
-from sqlalchemy import Column, Integer, String, Float, Text, DateTime, Boolean, ForeignKey, Index
+
+def _add_missing_columns():
+    """
+    create_all() creates NEW tables but never adds NEW columns to tables
+    that already exist. This adds any column defined on a model but missing
+    in the real database. Additive only: it never drops or alters data.
+    """
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            existing_cols = {c["name"] for c in inspector.get_columns(table.name)}
+            for col in table.columns:
+                if col.name not in existing_cols:
+                    col_type = col.type.compile(dialect=engine.dialect)
+                    conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}'))
+                    print(f"Added missing column {table.name}.{col.name}")
+
+from sqlalchemy import Column, Integer, String, Float, Text, DateTime, Boolean, ForeignKey
 from datetime import datetime
 
 
@@ -57,6 +79,8 @@ class StudentModel(Base):
     target_role = Column(String, nullable=True)
     github_link = Column(String, nullable=True)
     linkedin_id = Column(String, nullable=True)
+    deployed_demo_link = Column(String, nullable=True)   # student-entered portfolio evidence
+    project_readme_link = Column(String, nullable=True)  # student-entered portfolio evidence
     resume = Column(String, nullable=True)
     resume_json = Column(Text, nullable=True)
     salary_expected = Column(Float, default=0)
@@ -80,23 +104,47 @@ class ReadinessScoreModel(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class JobModel(Base):
-    __tablename__ = "jobs"
+class JobPostingModel(Base):
+    """
+    Recruiter-posted jobs — the single source of truth for job data in CPIP.
+    No external APIs. Recruiters post directly (single form or bulk upload).
+    """
+    __tablename__ = "job_postings"
 
     id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(String, unique=True, index=True, nullable=True)
-    job_title = Column(String)           # ← FIXED: was 'title'
-    company_name = Column(String)        # ← FIXED: was 'company'
+    title = Column(String, index=True)
+    company_name = Column(String)
     location = Column(String, index=True)
-    required_skills = Column(Text)       # ← FIXED: was 'skills_required'
-    preferred_skills = Column(Text, nullable=True)
+    required_skills = Column(Text, nullable=True)   # JSON array
+    preferred_skills = Column(Text, nullable=True)  # JSON array
     description = Column(Text, nullable=True)
     min_cgpa = Column(Float, default=0)
-    min_readiness = Column(Integer, default=0)
-    experience_level = Column(String, nullable=True)
-    salary_min = Column(Float, nullable=True)
-    salary_max = Column(Float, nullable=True)
-    posted_date = Column(String, nullable=True)
+    experience_level = Column(String, default="Fresher")
+    employment_type = Column(String, default="Full-Time")
+    salary_range = Column(String, nullable=True)
+    posted_by = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class InterviewAssessmentModel(Base):
+    """
+    Mock-interview results recorded by a human assessor (mentor / trainer /
+    placement officer). This is the ONLY source of interview scores in CPIP.
+    A dimension left empty (NULL) means "not assessed in this session".
+    """
+    __tablename__ = "interview_assessments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id"), index=True, nullable=False)
+    aptitude_score = Column(Float, nullable=True)
+    technical_score = Column(Float, nullable=True)
+    communication_score = Column(Float, nullable=True)
+    project_explanation_score = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    assessed_by = Column(String, nullable=False)
+    assessed_at = Column(DateTime, default=datetime.utcnow)
 
 
 class AuditLogModel(Base):
@@ -114,7 +162,7 @@ class JobApplicationModel(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     student_id = Column(Integer, ForeignKey("students.id"))
-    job_id = Column(String)
+    job_id = Column(Integer, ForeignKey("job_postings.id"))
     status = Column(String, default="applied")
     fit_score = Column(Float, default=0)
     applied_date = Column(DateTime, default=datetime.utcnow)
@@ -122,51 +170,8 @@ class JobApplicationModel(Base):
     interviewed_date = Column(DateTime, nullable=True)
     offer_date = Column(DateTime, nullable=True)
     recruiter_notes = Column(Text, nullable=True)
-
-
-class JobDescriptionCacheModel(Base):
-    __tablename__ = "job_description_cache"
-
-    id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(String, unique=True, index=True)
-    title = Column(String, nullable=True)          # ← FIXED: added
-    company = Column(String, nullable=True)        # ← FIXED: added
-    description = Column(Text)
-    skills_extracted = Column(Text)               # ← FIXED: was 'skills'
-    cached_at = Column(DateTime, default=datetime.utcnow)
-
-
-class JobSkillsCacheModel(Base):
-    __tablename__ = "job_skills_cache"
-
-    id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(String, index=True)
-    skill = Column(String)
-    cached_at = Column(DateTime, default=datetime.utcnow)
-
-
-class MarketSkillCacheModel(Base):
-    __tablename__ = "market_skill_cache"
-
-    id = Column(Integer, primary_key=True, index=True)
-    location = Column(String, default="india", index=True)
-    target_role = Column(String, index=True)
-    skill_name = Column(String, index=True)
-    demand_weight = Column(Integer, default=0)
-    postings_requiring_it = Column(Integer, default=0)
-    cached_at = Column(DateTime, default=datetime.utcnow)
-
-    __table_args__ = (
-        Index('idx_loc_role_skill', 'location', 'target_role', 'skill_name', unique=True),
-    )
-
-
-class RoleCacheMetadataModel(Base):
-    __tablename__ = "role_cache_metadata"
-
-    id = Column(Integer, primary_key=True, index=True)
-    last_cache_update = Column(DateTime, default=datetime.utcnow)
-    cache_version = Column(Integer, default=1)
+    updated_by = Column(String, nullable=True)   # human who last moved the stage
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class RecruiterModel(Base):

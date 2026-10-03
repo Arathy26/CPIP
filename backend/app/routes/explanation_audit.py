@@ -1,32 +1,38 @@
 """
 Explanation and Audit Routes
+- Explanation is built from the REAL outputs of every agent.
+- Every explanation request saves an audit record (decision trail).
+- Audit history is read from the audit_logs table.
 """
 
 from fastapi import APIRouter, HTTPException
 from app.data import seed_data
+from app.agents.explanation_agent import validate_explanation_result
+from app.services.orchestrator import run_full_pipeline
 
 router = APIRouter()
 
 
 @router.get("/explanation-audit/{student_id}")
 def get_explanation_audit(student_id: int):
-    student = seed_data.get_student(student_id)
-    if not student:
+    result = run_full_pipeline(student_id, event_type="ReadinessExplained")
+    if result.get("error"):
         raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
 
-    scores = seed_data.get_readiness_scores(student_id)
-    
-    audit_record = {
-        "student_id": student_id,
-        "target_role": student.get("target_role"),
-        "skill_gap_score": scores.get("skill_gap_score", 0),
-        "portfolio_score": scores.get("portfolio_score", 0),
-        "resume_score": scores.get("resume_score", 0),
-        "interview_readiness_score": scores.get("interview_readiness_score", 0),
-    }
-    
+    explanation = result["explanation"]
     return {
         "student_id": student_id,
-        "audit_log": audit_record,
-        "message": "Audit trail generated successfully"
+        "explanation": explanation,
+        "scores": result["scores"],
+        "audit": result["audit"],
+        "validation": validate_explanation_result(explanation),
+        "message": "Explanation generated and audit record saved",
     }
+
+
+@router.get("/audit-logs/{student_id}")
+def get_audit_logs(student_id: int, limit: int = 50):
+    if not seed_data.get_student(student_id):
+        raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
+    logs = seed_data.get_audit_logs(student_id, limit=min(max(limit, 1), 200))
+    return {"student_id": student_id, "total": len(logs), "audit_logs": logs}

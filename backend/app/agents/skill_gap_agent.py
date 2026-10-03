@@ -1,42 +1,39 @@
-"""
-Skill Gap Agent
-Compares candidate skills with job requirements and calculates skill gap score
-"""
+
+def _clean_skills(skills):
+    """Turn a skill list into a clean set: trimmed, lowercase, no empty entries."""
+    if not skills:
+        return set()
+    return {str(s).strip().lower() for s in skills if s and str(s).strip()}
+
 
 def skill_gap_agent(candidate_skills, required_skills, mandatory_skills=None):
     """
-    Compares candidate skills with required skills for a role.
-    
-    Args:
-        candidate_skills: List of skills student has (e.g., ["Python", "React"])
-        required_skills: List of skills required for role (e.g., ["Python", "React", "SQL"])
-        mandatory_skills: List of skills that MUST be present (subset of required_skills)
-        
-    Returns:
-        Dictionary with gap analysis
+    Compares candidate skills with required skills for ONE job.
+    Pure function: no database, no API calls.
     """
-    
-    if mandatory_skills is None:
-        mandatory_skills = required_skills
-    
-    # Convert to sets for comparison
-    candidate_set = set([s.lower() for s in candidate_skills])
-    required_set = set([s.lower() for s in required_skills])
-    mandatory_set = set([s.lower() for s in mandatory_skills])
-    
-    # Find matches and gaps
-    matched_skills = list(candidate_set & required_set)
-    missing_skills = list(required_set - candidate_set)
-    missing_mandatory = list(mandatory_set - candidate_set)
-    
-    # Calculate gap score (0-100)
-    if len(required_skills) == 0:
-        gap_score = 100
-    else:
-        matched_count = len(matched_skills)
-        gap_score = int((matched_count / len(required_skills)) * 100)
-    
-    # Determine readiness level
+    candidate_set = _clean_skills(candidate_skills)
+    required_set = _clean_skills(required_skills)
+    mandatory_set = _clean_skills(mandatory_skills) if mandatory_skills else required_set
+
+    # No requirements = nothing to compare. Do not invent a score.
+    if not required_set:
+        return {
+            "gap_score": None,
+            "matched_skills": [],
+            "missing_skills": [],
+            "missing_mandatory_skills": [],
+            "total_required_skills": 0,
+            "skills_matched": 0,
+            "readiness_level": "Not calculated",
+            "gap_analysis": "This job has no required skills defined"
+        }
+
+    matched_skills = sorted(candidate_set & required_set)
+    missing_skills = sorted(required_set - candidate_set)
+    missing_mandatory = sorted(mandatory_set - candidate_set)
+
+    gap_score = int((len(matched_skills) / len(required_set)) * 100)
+
     if gap_score >= 80:
         readiness = "High - Ready to apply"
     elif gap_score >= 60:
@@ -45,44 +42,16 @@ def skill_gap_agent(candidate_skills, required_skills, mandatory_skills=None):
         readiness = "Low - Significant preparation needed"
     else:
         readiness = "Very Low - Major skill development required"
-    
+
     return {
         "gap_score": gap_score,
         "matched_skills": matched_skills,
         "missing_skills": missing_skills,
         "missing_mandatory_skills": missing_mandatory,
-        "total_required_skills": len(required_skills),
+        "total_required_skills": len(required_set),
         "skills_matched": len(matched_skills),
         "readiness_level": readiness,
-        "gap_analysis": f"{len(matched_skills)} of {len(required_skills)} required skills present"
+        "gap_analysis": f"{len(matched_skills)} of {len(required_set)} required skills present"
     }
 
 
-def validate_gap_result(result):
-    """
-    Validates that gap analysis result is complete.
-    
-    Args:
-        result: The output from skill_gap_agent()
-        
-    Returns:
-        Dictionary with validation status
-    """
-    
-    required_fields = [
-        "gap_score", "matched_skills", "missing_skills", 
-        "readiness_level", "gap_analysis"
-    ]
-    
-    missing_fields = [field for field in required_fields if field not in result]
-    
-    if missing_fields:
-        return {
-            "valid": False,
-            "errors": f"Missing fields: {missing_fields}"
-        }
-    
-    return {
-        "valid": True,
-        "message": "Gap analysis is valid and complete"
-    }

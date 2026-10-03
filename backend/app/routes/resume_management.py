@@ -1,11 +1,17 @@
 """
-Resume Management - Production Version
-Uses OCR + Groq LLM for skill extraction — no hardcoding
+Resume Management
+Upload, list and select resumes. Skill extraction is DETERMINISTIC:
+the resume text is matched against the skills recruiters have posted in
+CPIP (seed_data.get_all_skill_names()). No LLM, no external API, no
+hardcoded skill list. Students can also edit their skills directly
+(PUT /api/students/{id}/skills).
 """
 
 from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Form
 from fastapi.responses import JSONResponse
 from app.data.database import SessionLocal, StudentModel, ResumeModel
+from app.data import seed_data
+from app.services.resume_parser import parse_resume, UnsupportedFileTypeError
 from datetime import datetime
 import os
 import json
@@ -16,108 +22,82 @@ UPLOAD_DIR = "uploads/resumes"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
+def _merge_skills(existing, extracted):
+    """Keep every skill the student already has, add newly found ones (no duplicates)."""
+    merged, seen = [], set()
+    for skill in list(existing or []) + list(extracted or []):
+        name = str(skill).strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            merged.append(name)
+    return merged
+
+
+def _extract_and_save(db, resume, student, file_bytes):
+    """
+    Parse the resume deterministically and save results on the resume row
+    (resume_json is what every readiness agent reads) and on the student.
+    """
+    target_role = (student.target_role if student else None) or ""
+    parsed = parse_resume(
+        filename=resume.file_name or "resume.pdf",
+        file_bytes=file_bytes,
+        target_role=target_role,
+        known_skill_names=seed_data.get_all_skill_names(),
+    )
+    if len((parsed.get("raw_text") or "").strip()) < 10:
+        raise ValueError("Could not read text from this file")
+
+    db.query(ResumeModel).filter(
+        ResumeModel.student_id == resume.student_id,
+        ResumeModel.id != resume.id,
+    ).update({"is_selected": False})
+
+    resume.resume_json = json.dumps(parsed)
+    resume.skills = json.dumps(parsed["skills"])
+    resume.projects = json.dumps(parsed["projects"])
+    resume.extraction_status = "completed"
+    resume.extraction_error = None
+    resume.completed_at = datetime.utcnow()
+    resume.is_selected = True
+
+    if student:
+        current = json.loads(student.skills) if student.skills else []
+        student.skills = json.dumps(_merge_skills(current, parsed["skills"]))
+        student.resume = resume.file_path
+        links = parsed.get("links") or {}
+        if links.get("github") and not student.github_link:
+            student.github_link = links["github"]
+        if links.get("linkedin") and not student.linkedin_id:
+            student.linkedin_id = links["linkedin"]
+        student.updated_at = datetime.utcnow()
+
+    db.commit()
+    return parsed
+
+
 def process_resume_background(resume_id: int):
-    """
-    Background task:
-    1. Read PDF bytes
-    2. Extract text via OCR
-    3. Extract skills via Groq LLM
-    4. Auto-populate market cache for student's role+location
-    5. Save to DB
-    """
+    """Background task for re-uploads: read file, extract deterministically, save."""
     db = SessionLocal()
+    resume = None
     try:
         resume = db.query(ResumeModel).filter(ResumeModel.id == resume_id).first()
         if not resume:
             return
-
-        print(f"🔄 Processing resume {resume_id}...")
-
-        # Step 1: Read file
         if not resume.file_path or not os.path.exists(resume.file_path):
-            resume.extraction_status = "failed"
-            resume.extraction_error = f"File not found: {resume.file_path}"
-            db.commit()
-            return
-
-        with open(resume.file_path, 'rb') as f:
+            raise FileNotFoundError(f"File not found: {resume.file_path}")
+        with open(resume.file_path, "rb") as f:
             file_bytes = f.read()
-
-        # Step 2: Extract text via OCR
-        try:
-            from app.services.resume_parser import extract_text
-            text = extract_text(resume.file_name or 'resume.pdf', file_bytes)
-            print(f"📄 Text extracted: {len(text)} chars")
-        except Exception as e:
-            print(f"❌ OCR failed: {e}")
-            resume.extraction_status = "failed"
-            resume.extraction_error = f"OCR failed: {str(e)}"
-            db.commit()
-            return
-
-        if not text or len(text.strip()) < 10:
-            resume.extraction_status = "failed"
-            resume.extraction_error = "Could not extract text from PDF"
-            db.commit()
-            return
-
-        # Step 3: Get student
-        student = db.query(StudentModel).filter(
-            StudentModel.id == resume.student_id
-        ).first()
-        target_role = student.target_role if student else "software engineer"
-
-        # Step 4: Extract skills via Groq LLM
-        try:
-            from app.services.external_jobs_service import extract_skills_from_text
-            skills = extract_skills_from_text(text, target_role=target_role)
-            print(f"✅ Skills extracted by Groq: {skills}")
-        except Exception as e:
-            print(f"❌ Groq extraction failed: {e}")
-            skills = []
-
-        # Step 5: Deselect old resumes
-        db.query(ResumeModel).filter(
-            ResumeModel.student_id == resume.student_id,
-            ResumeModel.id != resume.id
-        ).update({"is_selected": False})
-
-        resume.skills = json.dumps(skills)
-        resume.extraction_status = "completed"
-        resume.completed_at = datetime.utcnow()
-        resume.is_selected = True
-
-        # Update student skills
-        if student:
-            student.skills = json.dumps(skills)
-            student.resume = resume.file_path
-            student.updated_at = datetime.utcnow()
-
-        db.commit()
-        print(f"✅ Resume {resume_id} done! {len(skills)} skills saved.")
-
-        # Step 6: Auto-populate market cache — INSIDE the function
-        try:
-            from app.services.market_skill_fetcher import populate_market_skills_for_location_and_role
-            if student and student.target_role and student.location:
-                print(f"🔄 Auto-populating market cache for {student.location}/{student.target_role}")
-                populate_market_skills_for_location_and_role(
-                    location=student.location,
-                    target_role=student.target_role,
-                    max_postings=30
-                )
-                print(f"✅ Market cache ready for {student.target_role} in {student.location}")
-        except Exception as e:
-            print(f"⚠️ Market cache population failed (non-critical): {e}")
-
+        student = db.query(StudentModel).filter(StudentModel.id == resume.student_id).first()
+        parsed = _extract_and_save(db, resume, student, file_bytes)
+        print(f"Resume {resume_id}: {len(parsed['skills'])} skill(s) matched to recruiter vocabulary")
     except Exception as e:
-        print(f"❌ Error processing resume: {e}")
-        try:
+        print(f"Resume {resume_id} processing failed: {e}")
+        if resume is not None:
+            db.rollback()
             resume.extraction_status = "failed"
             resume.extraction_error = str(e)
             db.commit()
-        except:
-            pass
     finally:
         db.close()
 
@@ -134,10 +114,10 @@ async def upload_resume_new_student(
     """Upload resume for new OR existing student."""
     db = SessionLocal()
     try:
-        if not file.filename.endswith('.pdf'):
+        if not file.filename.lower().endswith('.pdf'):
             return JSONResponse(status_code=400, content={"detail": "Only PDF files allowed"})
 
-        # Find or create student
+        # Find or create student (by the email the student typed)
         student = None
         if email and email.strip():
             student = db.query(StudentModel).filter(
@@ -145,7 +125,6 @@ async def upload_resume_new_student(
             ).first()
 
         if not student:
-            # Safety checks — never save wrong data
             safe_name = name.strip() if name and name.strip() else "Candidate"
             safe_email = email.strip() if email and email.strip() else f"candidate_{int(datetime.utcnow().timestamp())}@cpip.local"
             safe_location = location.strip().lower() if location and location.strip() else "not specified"
@@ -165,7 +144,6 @@ async def upload_resume_new_student(
             db.refresh(student)
             print(f"✅ New student: name={student.name} role={student.target_role} location={student.location}")
         else:
-            # Only update fields that are actually provided
             if name and name.strip():
                 student.name = name.strip()
             if location and location.strip():
@@ -195,8 +173,25 @@ async def upload_resume_new_student(
         db.commit()
         db.refresh(resume)
 
-        if background_tasks:
-            background_tasks.add_task(process_resume_background, resume.id)
+        # Extract now: deterministic matching is fast, so the dashboard
+        # opens with real data instead of an empty profile.
+        try:
+            parsed = _extract_and_save(db, resume, student, contents)
+        except UnsupportedFileTypeError as e:
+            return JSONResponse(status_code=400, content={"detail": str(e)})
+        except Exception as e:
+            db.rollback()
+            resume.extraction_status = "failed"
+            resume.extraction_error = str(e)
+            db.commit()
+            return JSONResponse(status_code=400, content={"detail": f"Could not read resume: {e}"})
+
+        # Record the evaluation in the audit trail (never blocks the upload)
+        try:
+            from app.services.orchestrator import run_full_pipeline
+            run_full_pipeline(student.id, event_type="ResumeUploaded")
+        except Exception as e:
+            print(f"Audit after upload failed: {e}")
 
         return {
             "success": True,
@@ -204,8 +199,10 @@ async def upload_resume_new_student(
             "resume_id": resume.id,
             "file_name": file.filename,
             "location_saved": student.location,
-            "extraction_status": "pending",
-            "message": f"Resume uploaded for {student.name}. Extracting skills via AI..."
+            "extraction_status": "completed",
+            "detected_skills": parsed["skills"],
+            "skill_source": "Matched against skills recruiters have posted in CPIP",
+            "message": f"Resume uploaded for {student.name}. {len(parsed['skills'])} skill(s) detected."
         }
 
     except Exception as e:
@@ -230,7 +227,7 @@ async def upload_resume_existing_student(
         if not student:
             return JSONResponse(status_code=404, content={"detail": "Student not found"})
 
-        if not file.filename.endswith('.pdf'):
+        if not file.filename.lower().endswith('.pdf'):
             return JSONResponse(status_code=400, content={"detail": "Only PDF files allowed"})
 
         if location and location.strip():
@@ -264,7 +261,7 @@ async def upload_resume_existing_student(
             "student_id": student_id,
             "file_name": file.filename,
             "extraction_status": "pending",
-            "message": "Resume uploaded. Extracting skills via AI..."
+            "message": "Resume uploaded. Extracting skills..."
         }
 
     except Exception as e:

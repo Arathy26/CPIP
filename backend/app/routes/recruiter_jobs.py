@@ -9,7 +9,8 @@ from app.data.seed_data import (
     update_job_by_id,
     delete_job_by_id,
 )
-from app.services.recruiter_matching_agent import get_matched_candidates_for_job
+from app.services.recruiter_matching_agent import match_candidates_for_job, parse_skills
+from app.data.database import SessionLocal, StudentModel
 
 router = APIRouter(prefix="/api/recruiter", tags=["recruiter"])
 
@@ -44,15 +45,16 @@ def _job_to_dict(j):
     """Convert job object to dictionary"""
     return {
         "id": j.id,
-        "job_title": j.job_title,
+        "job_title": j.title,
         "company_name": j.company_name,
         "location": j.location,
-        "required_skills": j.required_skills,
+        "required_skills": parse_skills(j.required_skills),
+        "preferred_skills": parse_skills(j.preferred_skills),
         "min_cgpa": j.min_cgpa,
         "experience_level": j.experience_level,
-        "job_type": getattr(j, "job_type", "Remote"),
-        "employment_type": getattr(j, "employment_type", "Full-Time"),
-        "posted_date": j.posted_date,
+        "employment_type": j.employment_type,
+        "is_active": j.is_active,
+        "posted_date": j.created_at.isoformat() if j.created_at else None,
     }
 
 # ============================================================================
@@ -82,7 +84,7 @@ def get_jobs():
     """Get all jobs"""
     try:
         jobs = get_all_jobs()
-        return {"jobs": [_job_to_dict(j) for j in jobs]}
+        return {"jobs": jobs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -107,18 +109,14 @@ def get_job_matches(job_id: int):
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         
-        all_students = get_all_students()
-        readiness_scores_map = {}
-        
-        for student in all_students:
-            readiness_scores_map[student.id] = {
-                "skill_gap": 70,
-                "portfolio": 75,
-                "resume": 72,
-                "interview": 68,
-            }
-        
-        matches = get_matched_candidates_for_job(job, all_students, readiness_scores_map)
+        db = SessionLocal()
+        try:
+            all_students = db.query(StudentModel).all()
+        finally:
+            db.close()
+
+        # Same agent as /api/jobs/{job_id}/candidates — identical scores.
+        matches = match_candidates_for_job(job, all_students)
         
         return {"candidate_matches": matches}
     except HTTPException:
@@ -133,7 +131,7 @@ def update_job(job_id: int, req: RecruiterJobUpdateRequest):
         update_data = {}
         
         if req.job_title is not None:
-            update_data["job_title"] = req.job_title
+            update_data["title"] = req.job_title  # model column is "title"
         if req.location is not None:
             update_data["location"] = req.location
         if req.required_skills is not None:

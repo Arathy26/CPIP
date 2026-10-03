@@ -2,142 +2,111 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import cpipApi from "../services/cpipApi";
 
-export function useCPIP(searchedRole = null, preferredLocation = null) {
-  const { studentId } = useParams();
+/**
+ * Loads everything the candidate dashboard shows.
+ *
+ * Rule: a value the backend could not measure stays `null` ("not assessed")
+ * and is shown as "—". It is NEVER turned into 0, because 0 would tell the
+ * student they scored zero when the truth is "no data yet".
+ *
+ * `refreshKey` — bump it after a save to reload the dashboard.
+ */
+const EMPTY = {
+  readiness: null,
+  calculation: null,
+  scoresMissing: [],
+  targetRole: null,
+  jobs: 0,
+  skillsHave: [],
+  skillsMissing: [],
+  gapScore: null,
+  skillGapMessage: null,
+  basedOnPostings: null,
+  actionPlans: [],
+  jobMatches: [],
+  notifications: [],
+  unreadNotificationCount: 0,
+  interviewScore: null,
+  portfolioScore: null,
+  resumeScore: null,
+  topMissingSkill: null,
+  profile: null,
+  loading: true,
+  error: null,
+};
 
-  const [state, setState] = useState({
-    readiness: 0,
-    jobs: 0,
-    skillsHave: [],
-    skillsMissing: [],
-    gapScore: 0,
-    skillGapSupported: true,
-    skillGapMessage: null,
-    basedOnPostings: null,
-    resumeQuality: null,
-    actionPlans: [],
-    jobMatches: [],
-    notifications: [],
-    unreadNotificationCount: 0,
-    interviewScore: 0,
-    portfolioScore: 0,
-    resumeScore: 0,
-    topMissingSkill: null,
-    needsLocation: false,  // NEW: true when backend needs location
-    loading: true,
-    error: null,
-  });
+const value = (res) => (res.status === "fulfilled" ? res.value : null);
+
+export function useCPIP(refreshKey = 0) {
+  const { studentId } = useParams();
+  const [state, setState] = useState(EMPTY);
 
   useEffect(() => {
     if (!studentId) {
-      setState((s) => ({
-        ...s,
-        loading: false,
-        error: "No studentId found in the URL.",
-      }));
+      setState({ ...EMPTY, loading: false, error: "No studentId found in the URL." });
       return;
     }
 
     let cancelled = false;
 
     async function load() {
-      const [skillGapRes, jobMatchRes, trainingRes, notificationsRes, readinessRes] =
-        await Promise.allSettled([
-          cpipApi.getSkillGap(studentId),
-          cpipApi.getJobMatch(studentId, preferredLocation), // ← pass location
-          cpipApi.getTrainingPlan(studentId),
-          cpipApi.getNotifications(studentId),
-          cpipApi.getReadinessScores(studentId),
-        ]);
-
+      const results = await Promise.allSettled([
+        cpipApi.getSkillGap(studentId),
+        cpipApi.getJobMatch(studentId),
+        cpipApi.getTrainingPlan(studentId),
+        cpipApi.getNotifications(studentId),
+        cpipApi.getReadinessScores(studentId),
+        cpipApi.getCandidateProfile(studentId),
+      ]);
       if (cancelled) return;
 
-      const skillGap = skillGapRes.status === "fulfilled" ? skillGapRes.value : null;
-      const jobMatch = jobMatchRes.status === "fulfilled" ? jobMatchRes.value : null;
-      const training = trainingRes.status === "fulfilled" ? trainingRes.value : null;
-      const readinessData = readinessRes.status === "fulfilled" ? readinessRes.value : null;
+      const [skillGap, jobMatch, training, notificationsData, readinessData, profileData] =
+        results.map(value);
 
-      const skillGapSupported = skillGap?.supported !== false;
-      const gapAnalysis = skillGap?.gap_analysis ?? null;
-
-      const gapScore = skillGapSupported ? gapAnalysis?.gap_score ?? 0 : null;
-      const skillsHave = skillGapSupported ? gapAnalysis?.matched_skills ?? [] : [];
-      const skillsMissing = skillGapSupported ? gapAnalysis?.missing_skills ?? [] : [];
-      const skillGapMessage = skillGap?.message ?? null;
-      const basedOnPostings = gapAnalysis?.based_on_postings ?? null;
-      const resumeQuality = gapAnalysis?.resume_quality ?? null;
-      const rawTop = skillsMissing[0];
+      // Skill gap vs target role (recruiter postings)
+      const gap = skillGap?.gap_analysis ?? null;
+      const skillsMissing = gap?.missing_skills ?? [];
+      const firstMissing = skillsMissing[0];
       const topMissingSkill =
-  gapAnalysis?.detailed_missing?.[0]?.skill ??
-  (typeof rawTop === 'string' ? rawTop : rawTop?.skill) ??
-  null;
-      const jobMatchAnalysis = jobMatch?.job_match_analysis ?? null;
-      const allJobMatches = jobMatchAnalysis?.all_matches ?? [];
-      const suitableJobs = jobMatchAnalysis?.suitable_jobs ?? [];
-      const jobs = suitableJobs.length;
+        typeof firstMissing === "string" ? firstMissing : firstMissing?.skill ?? null;
 
-      // Check if backend is asking for location
-      const needsLocation = jobMatchAnalysis?.needs_location === true;
+      // Job matches (recruiter postings only)
+      const jobAnalysis = jobMatch?.job_match_analysis ?? null;
+      const jobMatches = jobAnalysis?.all_matches ?? [];
 
-      const trainingData = training?.training_plan ?? training;
-      const actionPlans = (
-        trainingData?.training_actions ??
-        trainingData?.priority_actions ??
-        []
-      ).map((action) => {
-        const isString = typeof action === "string";
-        return {
-          title: isString
-            ? action
-            : action.action ?? action.skill ?? action.title ?? "Recommended action",
-          duration: isString
-            ? "14"
-            : action.estimated_weeks
-            ? String(action.estimated_weeks * 7)
-            : "14",
-          ctaText: isString ? "Start →" : action.cta_text ?? "Start →",
-          color: isString
-            ? "amber"
-            : action.urgency === "urgent"
-            ? "red"
-            : "amber",
-        };
-      });
-
-      const readiness = gapScore ?? 0;
-
-      const notificationsData =
-        notificationsRes.status === "fulfilled" ? notificationsRes.value : null;
-      const notifications = notificationsData?.notifications ?? [];
-      const unreadNotificationCount = notificationsData?.unread_count ?? 0;
-
-      const interviewScore = readinessData?.interview_readiness_score ?? 0;
-      const portfolioScore = readinessData?.portfolio_score ?? 0;
-      const resumeScore = readinessData?.resume_score ?? 0;
+      // Training plan — every action comes from a real gap
+      const plan = training?.training_plan ?? null;
+      const actionPlans = (plan?.training_actions ?? []).map((a) => ({
+        rank: a.rank,
+        category: a.category,
+        title: a.action,
+        reason: a.reason,
+      }));
 
       setState({
-        readiness,
-        jobs,
-        skillsHave,
+        readiness: readinessData?.overall_readiness ?? null,
+        calculation: readinessData?.calculation ?? null,
+        scoresMissing: readinessData?.scores_missing ?? [],
+        targetRole: readinessData?.target_role ?? gap?.target_role ?? null,
+        jobs: jobMatches.length,
+        skillsHave: gap?.matched_skills ?? [],
         skillsMissing,
-        gapScore,
-        skillGapSupported,
-        skillGapMessage,
-        basedOnPostings,
-        resumeQuality,
+        gapScore: gap?.gap_score ?? null,
+        skillGapMessage: gap?.message ?? null,
+        basedOnPostings: gap?.job_postings_analyzed || null,
         actionPlans,
-        jobMatches: allJobMatches,
-        notifications,
-        unreadNotificationCount,
-        interviewScore,
-        portfolioScore,
-        resumeScore,
+        jobMatches,
+        notifications: notificationsData?.notifications ?? [],
+        unreadNotificationCount: notificationsData?.unread_count ?? 0,
+        interviewScore: readinessData?.interview_readiness_score ?? null,
+        portfolioScore: readinessData?.portfolio_score ?? null,
+        resumeScore: readinessData?.resume_score ?? null,
         topMissingSkill,
-        needsLocation,
+        profile: profileData?.candidate_profile ?? null,
         loading: false,
         error:
-          !skillGap && !jobMatch && !training
-            ? "Could not load any candidate data."
+          !readinessData && !skillGap && !jobMatch
+            ? "Could not load candidate data. Is the backend running?"
             : null,
       });
     }
@@ -146,7 +115,7 @@ export function useCPIP(searchedRole = null, preferredLocation = null) {
     return () => {
       cancelled = true;
     };
-  }, [studentId, searchedRole, preferredLocation]); // ← re-run when location changes
+  }, [studentId, refreshKey]);
 
   return state;
 }

@@ -1,3 +1,4 @@
+import { API_BASE } from '../services/cpipApi';
 import React, { useState, useEffect } from 'react';
 import { Upload, Search, CheckCircle, Clock, AlertCircle, Trash2 } from 'lucide-react';
 
@@ -13,7 +14,6 @@ import { Upload, Search, CheckCircle, Clock, AlertCircle, Trash2 } from 'lucide-
  */
 
 const ResumeSelector = ({ studentId }) => {
-  const API_BASE = 'http://127.0.0.1:8000/api';
   
   // State
   const [activeTab, setActiveTab] = useState('library'); // 'library' or 'upload'

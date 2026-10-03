@@ -7,9 +7,9 @@ import json
 from datetime import datetime
 from app.data.database import SessionLocal, init_db
 from app.data.database import (
-    StudentModel, JobModel, ResumeModel,
+    StudentModel, JobPostingModel, ResumeModel, InterviewAssessmentModel,
     ReadinessScoreModel,
-    MarketSkillCacheModel, AuditLogModel,
+    AuditLogModel,
     RecruiterModel, JobApplicationModel
 )
 
@@ -70,7 +70,6 @@ def add_student(student_data):
                 db.commit()
                 db.refresh(existing)
 
-                # Clear old skill gap cache if role changed
                 if old_role and new_role and old_role.strip().lower() != new_role.strip().lower():
                     old_scores = db.query(ReadinessScoreModel).filter(
                         ReadinessScoreModel.student_id == existing.id
@@ -84,7 +83,6 @@ def add_student(student_data):
 
                 return _student_to_dict(existing)
 
-        # Create new student
         new_student = StudentModel(
             name=student_data.get("name", "Candidate"),
             email=student_data.get("email", ""),
@@ -117,6 +115,8 @@ def _student_to_dict(s):
         "target_role": s.target_role,
         "github_link": s.github_link,
         "linkedin_id": s.linkedin_id,
+        "deployed_demo_link": s.deployed_demo_link,
+        "project_readme_link": s.project_readme_link,
         "resume": s.resume,
         "salary_expected": s.salary_expected,
         "skills": json.loads(s.skills) if s.skills else [],
@@ -128,7 +128,9 @@ def _student_to_dict(s):
 def get_all_jobs():
     db = _get_db()
     try:
-        jobs = db.query(JobModel).all()
+        jobs = db.query(JobPostingModel).filter(
+            JobPostingModel.is_active == True
+        ).all()
         return [_job_to_dict(j) for j in jobs]
     finally:
         db.close()
@@ -137,8 +139,16 @@ def get_all_jobs():
 def get_job(job_id):
     db = _get_db()
     try:
-        j = db.query(JobModel).filter(JobModel.id == job_id).first()
+        j = db.query(JobPostingModel).filter(JobPostingModel.id == job_id).first()
         return _job_to_dict(j) if j else None
+    finally:
+        db.close()
+
+
+def get_job_by_id(job_id):
+    db = _get_db()
+    try:
+        return db.query(JobPostingModel).filter(JobPostingModel.id == job_id).first()
     finally:
         db.close()
 
@@ -146,29 +156,92 @@ def get_job(job_id):
 def add_job(job_data):
     db = _get_db()
     try:
-        new_job = JobModel(
-            job_title=job_data["job_title"],
+        new_job = JobPostingModel(
+            title=job_data.get("job_title") or job_data.get("title", "Untitled"),
             company_name=job_data.get("company_name", "Unknown"),
             location=job_data.get("location", "Remote"),
             required_skills=json.dumps(job_data.get("required_skills", [])),
             preferred_skills=json.dumps(job_data.get("preferred_skills", [])),
             min_cgpa=job_data.get("min_cgpa", 0),
-            min_readiness=job_data.get("min_readiness", 0),
-            experience_level=job_data.get("experience_level") or "Not specified",
-            posted_date=datetime.now().strftime("%b %d, %Y"),
+            experience_level=job_data.get("experience_level") or "Fresher",
+            employment_type=job_data.get("employment_type", "Full-Time"),
+            salary_range=job_data.get("salary_range", None),
+            posted_by=job_data.get("posted_by", "Recruiter"),
+            is_active=True,
         )
         db.add(new_job)
         db.commit()
         db.refresh(new_job)
-        job_dict = _job_to_dict(new_job)
+        return _job_to_dict(new_job)
+    finally:
+        db.close()
 
-        try:
-            from app.services.vector_store import add_job_to_vector_store
-            add_job_to_vector_store(job_dict)
-        except Exception as e:
-            print(f"Vector store error: {e}")
 
-        return job_dict
+def add_job_with_recruiter(
+    job_title, company_name, location,
+    required_skills, min_cgpa, experience_level,
+    job_type, employment_type
+):
+    db = _get_db()
+    try:
+        new_job = JobPostingModel(
+            title=job_title,
+            company_name=company_name,
+            location=location,
+            required_skills=json.dumps(required_skills),
+            preferred_skills=json.dumps([]),
+            min_cgpa=min_cgpa,
+            experience_level=experience_level,
+            employment_type=employment_type,
+            is_active=True,
+        )
+        db.add(new_job)
+        db.commit()
+        db.refresh(new_job)
+        return new_job
+    finally:
+        db.close()
+
+
+def update_job_by_id(job_id, update_data):
+    db = _get_db()
+    try:
+        job = db.query(JobPostingModel).filter(JobPostingModel.id == job_id).first()
+        if not job:
+            return None
+        for key, value in update_data.items():
+            if key == "required_skills" and isinstance(value, list):
+                value = json.dumps(value)
+            if hasattr(job, key):
+                setattr(job, key, value)
+        db.commit()
+        db.refresh(job)
+        return job
+    finally:
+        db.close()
+
+
+def delete_job_by_id(job_id):
+    db = _get_db()
+    try:
+        job = db.query(JobPostingModel).filter(JobPostingModel.id == job_id).first()
+        if not job:
+            return False
+        job.is_active = False
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def job_exists(job_title, company_name):
+    db = _get_db()
+    try:
+        existing = db.query(JobPostingModel).filter(
+            JobPostingModel.title == job_title,
+            JobPostingModel.company_name == company_name
+        ).first()
+        return existing is not None
     finally:
         db.close()
 
@@ -184,7 +257,6 @@ def search_jobs(jobs, query):
             job.get("company_name", ""),
             job.get("location", ""),
             " ".join(job.get("required_skills", [])),
-            " ".join(job.get("preferred_skills", [])),
         ]).lower()
         if q in haystack:
             results.append(job)
@@ -194,15 +266,17 @@ def search_jobs(jobs, query):
 def _job_to_dict(j):
     return {
         "id": j.id,
-        "job_title": j.job_title,
+        "job_title": j.title,
         "company_name": j.company_name,
         "location": j.location,
         "required_skills": json.loads(j.required_skills) if j.required_skills else [],
         "preferred_skills": json.loads(j.preferred_skills) if j.preferred_skills else [],
         "min_cgpa": j.min_cgpa,
-        "min_readiness": j.min_readiness,
         "experience_level": j.experience_level,
-        "posted_date": j.posted_date,
+        "employment_type": j.employment_type,
+        "salary_range": j.salary_range,
+        "posted_by": j.posted_by,
+        "is_active": j.is_active,
     }
 
 
@@ -219,8 +293,12 @@ def get_all_skill_names():
 def get_resume(student_id):
     db = _get_db()
     try:
+        # Prefer the resume the student selected; otherwise the most recent one
         r = db.query(ResumeModel).filter(
             ResumeModel.student_id == student_id
+        ).order_by(
+            ResumeModel.is_selected.desc(),
+            ResumeModel.uploaded_at.desc()
         ).first()
         if not r:
             return None
@@ -296,116 +374,111 @@ def update_readiness_scores(student_id, scores):
         db.close()
 
 
-# ── ROLE REQUIREMENTS (kept for compatibility) ──
+# ── ROLE REQUIREMENTS ──
+
+def _parse_skill_list(raw):
+    """Skills are stored as a JSON array, but tolerate comma-separated text."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else [str(parsed)]
+    except (ValueError, TypeError):
+        return [s.strip() for s in str(raw).split(",")]
+
 
 def get_role_requirements(role_name):
-    return None
+    """
+    Required skills for a target ROLE, built from real recruiter postings.
 
+    Source: every ACTIVE job posting whose title contains role_name.
+    Skills are combined across those postings; skills asked for by more
+    postings come first. Nothing is hardcoded.
 
-def get_role_names():
-    return []
+    Returns None when no recruiter has posted a job for this role yet, so
+    callers can honestly say "no role data yet" instead of guessing.
+    """
+    if not role_name or not str(role_name).strip():
+        return None
 
-
-def get_all_target_roles():
-    return {}
-
-
-# ── JOB DESCRIPTION CACHE ──
-
-def get_cached_job_description(job_id: str):
-    """Get cached job description to avoid repeated API calls."""
     db = _get_db()
     try:
-        from app.data.database import JobDescriptionCacheModel
-        entry = db.query(JobDescriptionCacheModel).filter(
-            JobDescriptionCacheModel.job_id == job_id
-        ).first()
-        if not entry:
+        postings = db.query(JobPostingModel).filter(
+            JobPostingModel.is_active == True,
+            JobPostingModel.title.ilike(f"%{role_name.strip()}%")
+        ).all()
+        if not postings:
             return None
+
+        demand = {}  # lowercase skill -> {"skill": display name, "count": n}
+        for job in postings:
+            seen_in_this_job = set()
+            for skill in _parse_skill_list(job.required_skills):
+                name = str(skill).strip()
+                key = name.lower()
+                if not key or key in seen_in_this_job:
+                    continue
+                seen_in_this_job.add(key)
+                if key in demand:
+                    demand[key]["count"] += 1
+                else:
+                    demand[key] = {"skill": name, "count": 1}
+
+        if not demand:
+            return None
+
+        ordered = sorted(demand.values(), key=lambda d: (-d["count"], d["skill"].lower()))
         return {
-            "job_id": entry.job_id,
-            "title": entry.title,
-            "company": entry.company,
-            "description": entry.description,
-            "skills_extracted": json.loads(entry.skills_extracted) if entry.skills_extracted else [],
+            "role": role_name.strip(),
+            "required_skills": [d["skill"] for d in ordered],
+            "skill_demand": {d["skill"]: d["count"] for d in ordered},
+            "job_postings_analyzed": len(postings),
+            "source": "recruiter_job_postings",
         }
     finally:
         db.close()
 
+def get_role_names():
+    return []
 
-def cache_job_description(job_id: str, title: str, company: str, description: str, skills: list):
-    """Cache job description and extracted skills."""
+def get_all_target_roles():
+    """
+    Every distinct role title recruiters have posted (active jobs only),
+    with the required skills combined across postings of that title.
+    Returns {display_title: {"required_skills": [...], "skill_demand": {...},
+                             "job_postings": n}}. Empty dict if no postings.
+    """
     db = _get_db()
     try:
-        from app.data.database import JobDescriptionCacheModel
-        existing = db.query(JobDescriptionCacheModel).filter(
-            JobDescriptionCacheModel.job_id == job_id
-        ).first()
-        if existing:
-            existing.title = title
-            existing.company = company
-            existing.description = description
-            existing.skills_extracted = json.dumps(skills)
-            existing.cached_at = datetime.utcnow()  # ← FIXED: was time.time()
-        else:
-            new_cache = JobDescriptionCacheModel(
-                job_id=job_id,
-                title=title,
-                company=company,
-                description=description,
-                skills_extracted=json.dumps(skills),
-                cached_at=datetime.utcnow(),         # ← FIXED: was time.time()
-            )
-            db.add(new_cache)
-        db.commit()
+        postings = db.query(JobPostingModel).filter(JobPostingModel.is_active == True).all()
+        roles = {}
+        for job in postings:
+            if not job.title or not job.title.strip():
+                continue
+            key = job.title.strip().lower()
+            role = roles.setdefault(key, {"title": job.title.strip(), "demand": {}, "job_postings": 0})
+            role["job_postings"] += 1
+            seen = set()
+            for skill in _parse_skill_list(job.required_skills):
+                name = str(skill).strip()
+                k = name.lower()
+                if not k or k in seen:
+                    continue
+                seen.add(k)
+                entry = role["demand"].setdefault(k, {"skill": name, "count": 0})
+                entry["count"] += 1
+
+        result = {}
+        for role in roles.values():
+            ordered = sorted(role["demand"].values(), key=lambda d: (-d["count"], d["skill"].lower()))
+            result[role["title"]] = {
+                "required_skills": [d["skill"] for d in ordered],
+                "skill_demand": {d["skill"]: d["count"] for d in ordered},
+                "job_postings": role["job_postings"],
+            }
+        return result
     finally:
         db.close()
-
-
-# ── JOB SKILLS CACHE ──
-
-def cache_job_skills(job_id: str, skills: list):
-    """Store extracted skills for a job."""
-    db = _get_db()
-    try:
-        from app.data.database import JobSkillsCacheModel
-        for skill in skills:
-            skill_entry = JobSkillsCacheModel(
-                job_id=job_id,
-                skill=skill.lower(),
-            )
-            db.add(skill_entry)
-        db.commit()
-        print(f"✓ Cached {len(skills)} skills for job '{job_id}'")
-    except Exception as e:
-        print(f"❌ Error caching skills: {e}")
-    finally:
-        db.close()
-
-
-def get_cached_job_skills(job_id: str) -> list:
-    """Get cached skills for a specific job."""
-    db = _get_db()
-    try:
-        from app.data.database import JobSkillsCacheModel
-        skills = db.query(JobSkillsCacheModel).filter(
-            JobSkillsCacheModel.job_id == job_id
-        ).all()
-        return [s.skill for s in skills] if skills else []
-    finally:
-        db.close()
-
-
-# ── MARKET SKILL CACHE ──
-
-def get_cached_market_skill_demand(target_role):
-    """Legacy compatibility — not used by new location-aware system."""
-    return None
-
-
-def cache_market_skill_demand(target_role, skill_frequency, total_postings):
-    """Legacy compatibility — not used by new location-aware system."""
-    return None
 
 
 # ── RECRUITERS ──
@@ -523,22 +596,6 @@ def update_application_status(application_id, new_status):
         db.close()
 
 
-def update_application_fit_score(application_id, fit_score):
-    db = _get_db()
-    try:
-        app = db.query(JobApplicationModel).filter(
-            JobApplicationModel.id == application_id
-        ).first()
-        if not app:
-            return None
-        app.fit_score = fit_score
-        db.commit()
-        db.refresh(app)
-        return _job_application_to_dict(app)
-    finally:
-        db.close()
-
-
 def _job_application_to_dict(app):
     if not app:
         return None
@@ -556,5 +613,120 @@ def _job_application_to_dict(app):
 
 
 def mark_notification_read(notification_id):
-    """Stub — notifications not implemented yet."""
     return None
+
+# ── INTERVIEW ASSESSMENTS (mock interviews recorded by a human) ──
+
+INTERVIEW_DIMENSIONS = ["aptitude", "technical", "communication", "project_explanation"]
+
+
+def _assessment_to_dict(a):
+    return {
+        "id": a.id,
+        "student_id": a.student_id,
+        "aptitude_score": a.aptitude_score,
+        "technical_score": a.technical_score,
+        "communication_score": a.communication_score,
+        "project_explanation_score": a.project_explanation_score,
+        "notes": a.notes,
+        "assessed_by": a.assessed_by,
+        "assessed_at": a.assessed_at.isoformat() if a.assessed_at else None,
+    }
+
+
+def add_interview_assessment(student_id, data):
+    db = _get_db()
+    try:
+        row = InterviewAssessmentModel(
+            student_id=student_id,
+            aptitude_score=data.get("aptitude_score"),
+            technical_score=data.get("technical_score"),
+            communication_score=data.get("communication_score"),
+            project_explanation_score=data.get("project_explanation_score"),
+            notes=data.get("notes"),
+            assessed_by=data["assessed_by"],
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return _assessment_to_dict(row)
+    finally:
+        db.close()
+
+
+def get_interview_assessments(student_id):
+    """All assessments for a student, newest first."""
+    db = _get_db()
+    try:
+        rows = db.query(InterviewAssessmentModel).filter(
+            InterviewAssessmentModel.student_id == student_id
+        ).order_by(InterviewAssessmentModel.assessed_at.desc(), InterviewAssessmentModel.id.desc()).all()
+        return [_assessment_to_dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+def get_latest_interview_scores(student_id):
+    """
+    Most recent assessed value for EACH dimension (a later session may assess
+    only some dimensions). Unassessed dimensions are None — never a default.
+    Returns (scores_dict, evidence_dict).
+    """
+    scores = {f"{d}_score": None for d in INTERVIEW_DIMENSIONS}
+    evidence = {}
+    for a in get_interview_assessments(student_id):  # newest first
+        for d in INTERVIEW_DIMENSIONS:
+            key = f"{d}_score"
+            if scores[key] is None and a.get(key) is not None:
+                scores[key] = a[key]
+                evidence[d] = {
+                    "assessment_id": a["id"],
+                    "assessed_by": a["assessed_by"],
+                    "assessed_at": a["assessed_at"],
+                    "notes": a["notes"],
+                }
+    return scores, evidence
+
+
+# ── AUDIT TRAIL ──
+
+def save_audit_record(record):
+    """Persist an audit_agent record into audit_logs. Returns it with its real id."""
+    from app.data.database import AuditLogModel
+    db = _get_db()
+    try:
+        row = AuditLogModel(
+            student_id=record.get("candidate_id"),
+            event_type=record.get("event_type"),
+            details=json.dumps(record, default=str),
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {**record, "audit_id": row.id, "audit_status": "recorded"}
+    finally:
+        db.close()
+
+
+def get_audit_logs(student_id, limit=50):
+    from app.data.database import AuditLogModel
+    db = _get_db()
+    try:
+        rows = db.query(AuditLogModel).filter(
+            AuditLogModel.student_id == student_id
+        ).order_by(AuditLogModel.created_at.desc(), AuditLogModel.id.desc()).limit(limit).all()
+        out = []
+        for r in rows:
+            try:
+                details = json.loads(r.details) if r.details else {}
+            except (ValueError, TypeError):
+                details = {"raw": r.details}
+            out.append({
+                "audit_id": r.id,
+                "event_type": r.event_type,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "details": details,
+            })
+        return out
+    finally:
+        db.close()

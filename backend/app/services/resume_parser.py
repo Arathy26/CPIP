@@ -120,12 +120,34 @@ def detect_degree(text: str):
 
 def detect_skills(text: str, known_skill_names):
     """
-    Case-insensitive substring match against the SAME skill vocabulary
-    used by seed_data.py (get_all_skill_names()) — not a separate,
-    invented skill list.
+    Whole-skill, case-insensitive match against the skill vocabulary that
+    recruiters have posted (seed_data.get_all_skill_names()). Deterministic:
+    the same resume always gives the same skills. No LLM, no invented list.
+    "C" does not match inside "React"; "Java" does not match "JavaScript".
     """
     lower_text = text.lower()
-    return [skill for skill in known_skill_names if skill.lower() in lower_text]
+    found = []
+    for skill in known_skill_names or []:
+        name = str(skill).strip()
+        if not name:
+            continue
+        pattern = r"(?<![a-z0-9+#.])" + re.escape(name.lower()) + r"(?![a-z0-9+#])"
+        if re.search(pattern, lower_text):
+            found.append(name)
+    return found
+
+
+_URL_PATTERN = re.compile(r"(https?://[^\s<>()\[\]\"',]+|www\.[^\s<>()\[\]\"',]+|(?:github|linkedin)\.com/[^\s<>()\[\]\"',]+)", re.IGNORECASE)
+
+
+def detect_links(text: str):
+    """GitHub / LinkedIn profile links written in the resume text."""
+    urls = [u.rstrip(".;:") for u in _URL_PATTERN.findall(text or "")]
+    def with_scheme(u):
+        return u if u is None or u.lower().startswith(("http://", "https://")) else f"https://{u}"
+    github = next((u for u in urls if "github.com" in u.lower()), None)
+    linkedin = next((u for u in urls if "linkedin.com" in u.lower()), None)
+    return {"github": with_scheme(github), "linkedin": with_scheme(linkedin)}
 
 
 def detect_projects_section(text: str):
@@ -194,6 +216,7 @@ def parse_resume(filename: str, file_bytes: bytes, target_role: str, known_skill
             "phone": detect_phone(text),
         },
         "role_alignment": detect_role_alignment(text, target_role),
+        "links": detect_links(text),
         "raw_text": text,  # NEW — needed by resume_readiness_agent for metrics/keyword checks
         "_raw_text_length": len(text),  # sanity-check signal, not shown to users
     }

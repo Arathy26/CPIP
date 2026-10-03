@@ -1,143 +1,101 @@
 """
 Job Opportunity Agent
-Matches students to job openings based on skills and readiness
+Matches ONE student against recruiter-posted job openings.
+
+There is ONE source of matching logic in CPIP:
+app/services/recruiter_matching_agent.py (versioned MATCHING_RULES,
+skills-only, CGPA intentionally NOT checked). The API route
+/api/job-match/{student_id} already uses it.
+
+This agent is the catalog-named entry point for workflow callers
+(orchestrator / LangGraph) that work with plain dicts. It delegates to the
+same rules, so a student sees the same result everywhere.
+
+Pure function: jobs are passed in by the caller; no database access here.
 """
 
-import re
+from types import SimpleNamespace
+from app.services.recruiter_matching_agent import (
+    MATCHING_RULES,
+    evaluate_match,
+    parse_skills,
+)
 
 
-def _tier_from_score(fit_score):
+def _as_student(candidate_profile):
+    return SimpleNamespace(
+        id=candidate_profile.get("candidate_id"),
+        skills=candidate_profile.get("skills", []),
+    )
+
+
+def _as_job(job):
+    return SimpleNamespace(
+        id=job.get("id") or job.get("job_id"),
+        title=job.get("job_title") or job.get("title"),
+        required_skills=job.get("required_skills", []),
+        preferred_skills=job.get("preferred_skills", []),
+        is_active=job.get("is_active", True),
+    )
+
+
+def job_opportunity_agent(candidate_profile, job_opportunities=None, readiness_scores=None):
     """
-    4-tier match labels, agreed thresholds:
-    Perfect Match >=95, High Match >=80, Medium Match >=50, Low Match <50.
+    Args:
+        candidate_profile: {"candidate_id", "skills", ...}
+        job_opportunities: list of job dicts (seed_data.get_all_jobs() shape)
+        readiness_scores: accepted for workflow compatibility; NOT used —
+                          matching is skills-only by CPIP rule
+    Returns:
+        Dictionary with job matches
     """
-    if fit_score >= 95:
-        return "Perfect Match"
-    elif fit_score >= 80:
-        return "High Match"
-    elif fit_score >= 50:
-        return "Medium Match"
-    else:
-        return "Low Match"
+    candidate_id = candidate_profile.get("candidate_id")
 
+    if not job_opportunities:
+        return {
+            "candidate_id": candidate_id,
+            "all_matches": [],
+            "suitable_jobs": [],
+            "recommendation_count": 0,
+            "open_jobs_evaluated": 0,
+            "recommendation_summary": "No open job postings yet. Recruiters have not posted any jobs.",
+            "rules_version": MATCHING_RULES["version"],
+        }
 
-def _text_contains_skill_as_word(text_lower, skill):
-    """
-    Whole-word match only — NOT plain substring matching. FIXES A REAL
-    BUG: checking "react" as a substring would also match inside
-    "reactive", "reacted", "reaction" — words that don't actually mean
-    the candidate knows React. \\b word boundaries make sure "react" only
-    matches the standalone word, not a fragment of a longer word.
-    """
-    if not text_lower or not skill:
-        return False
-    pattern = r"\b" + re.escape(skill) + r"\b"
-    return bool(re.search(pattern, text_lower))
-
-
-def _score_fit(candidate_skills_lower, candidate_cgpa, candidate_readiness, job, raw_resume_text=""):
-    """
-    Re-scans the candidate's actual resume text against THIS job's
-    specific required/preferred skills, not just the frozen
-    candidate.skills snapshot from upload time. Uses whole-word matching
-    to avoid false positives.
-    """
-    required_set = set([s.lower() for s in job.get("required_skills", [])])
-    preferred_set = set([s.lower() for s in job.get("preferred_skills", [])])
-    text_lower = (raw_resume_text or "").lower()
-
-    def _is_matched(skill):
-        return skill in candidate_skills_lower or _text_contains_skill_as_word(text_lower, skill)
-
-    required_matched = set(s for s in required_set if _is_matched(s))
-    preferred_matched = set(s for s in preferred_set if _is_matched(s))
-
-    required_percentage = (len(required_matched) / len(required_set)) * 100 if required_set else 100
-    preferred_percentage = (len(preferred_matched) / len(preferred_set)) * 100 if preferred_set else 100
-
-    fit_score = int((required_percentage * 0.7) + (preferred_percentage * 0.3))
-
-    min_cgpa = job.get("min_cgpa", 0)
-    min_readiness = job.get("min_readiness", 0)
-    cgpa_eligible = candidate_cgpa >= min_cgpa
-    readiness_eligible = candidate_readiness >= min_readiness
-
-    if cgpa_eligible and readiness_eligible:
-        eligibility = "Eligible"
-    elif cgpa_eligible or readiness_eligible:
-        eligibility = "Conditionally Eligible"
-    else:
-        eligibility = "Not Eligible"
-
-    suitability = _tier_from_score(fit_score)
-
-    return {
-        "fit_score": fit_score,
-        "suitability": suitability,
-        "eligibility": eligibility,
-        "required_skills_matched": list(required_matched),
-        "required_skills_missing": list(required_set - required_matched),
-        "preferred_skills_missing": list(preferred_set - preferred_matched),
-        "min_cgpa_required": min_cgpa,
-        "candidate_cgpa": candidate_cgpa,
-        "min_readiness_required": min_readiness,
-        "candidate_readiness": candidate_readiness,
-    }
-
-
-def job_opportunity_agent(candidate_profile, readiness_scores, job_opportunities, raw_resume_text=""):
-    """Matches ONE candidate against ALL real job postings."""
-    candidate_skills = set([s.lower() for s in candidate_profile.get("skills", [])])
-    candidate_cgpa = candidate_profile.get("cgpa", 0)
-    candidate_readiness = readiness_scores.get("skill_gap_score", 0)
-
-    matched_jobs = []
+    student = _as_student(candidate_profile)
+    matches = []
+    evaluated = 0
     for job in job_opportunities:
-        scored = _score_fit(candidate_skills, candidate_cgpa, candidate_readiness, job, raw_resume_text)
-        matched_jobs.append({
-            "job_id": job.get("id"),
-            "job_title": job["job_title"],
-            "company_name": job.get("company_name", "Unknown"),
-            "location": job.get("location", "Not specified"),
-            "experience_level": job.get("experience_level", "Not specified"),
-            **scored,
-        })
+        j = _as_job(job)
+        if not j.is_active:
+            continue
+        evaluated += 1
+        result = evaluate_match(student, j)
+        if result["is_match"]:
+            result.update({
+                "job_title": j.title,
+                "company_name": job.get("company_name"),
+                "location": job.get("location"),
+                "experience_level": job.get("experience_level"),
+                "required_skills": parse_skills(j.required_skills),
+                "preferred_skills": parse_skills(j.preferred_skills),
+            })
+            matches.append(result)
 
-    matched_jobs.sort(key=lambda x: x["fit_score"], reverse=True)
-
-    suitable_jobs = [
-        j for j in matched_jobs
-        if j["suitability"] in ["Perfect Match", "High Match"] and j["eligibility"] == "Eligible"
-    ]
+    matches.sort(key=lambda r: (-r["fit_score"], r["job_id"] or 0))
 
     return {
-        "candidate_id": candidate_profile.get("candidate_id"),
-        "all_matches": matched_jobs,
-        "suitable_jobs": suitable_jobs[:3],
-        "recommendation_count": len(suitable_jobs),
-        "recommendation_summary": f"Found {len(suitable_jobs)} suitable job(s) for this candidate",
+        "candidate_id": candidate_id,
+        "all_matches": matches,
+        "suitable_jobs": matches,
+        "recommendation_count": len(matches),
+        "open_jobs_evaluated": evaluated,
+        "recommendation_summary": (
+            f"{len(matches)} posted role(s) match this profile" if matches
+            else "No open posting matches this profile's skills yet."
+        ),
+        "rules_version": MATCHING_RULES["version"],
     }
-
-
-def match_candidates_to_job(job, candidates_with_scores):
-    """Matches ONE job against ALL candidates — the recruiter's view."""
-    results = []
-    for candidate_profile, readiness_scores, raw_resume_text in candidates_with_scores:
-        candidate_skills = set([s.lower() for s in candidate_profile.get("skills", [])])
-        candidate_cgpa = candidate_profile.get("cgpa", 0)
-        candidate_readiness = readiness_scores.get("skill_gap_score", 0)
-
-        scored = _score_fit(candidate_skills, candidate_cgpa, candidate_readiness, job, raw_resume_text)
-        results.append({
-            "candidate_id": candidate_profile.get("candidate_id"),
-            "candidate_name": candidate_profile.get("name"),
-            "cgpa": candidate_profile.get("cgpa"),
-            "degree": candidate_profile.get("degree"),
-            **scored,
-        })
-
-    results.sort(key=lambda x: x["fit_score"], reverse=True)
-    return results
 
 
 def validate_job_match_result(result):

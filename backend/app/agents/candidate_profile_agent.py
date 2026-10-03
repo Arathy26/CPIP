@@ -33,9 +33,12 @@ def candidate_profile_agent(student_data):
             "target_role": student_data.get("target_role"),
             "salary_expectation": student_data.get("salary_expected")
         },
+        "skills": student_data.get("skills", []),
         "portfolio": {
             "github": student_data.get("github_link"),
             "linkedin": student_data.get("linkedin_id"),
+            "deployed_demo": student_data.get("deployed_demo_link"),
+            "project_readme": student_data.get("project_readme_link"),
             "resume": student_data.get("resume")
         }
     }
@@ -54,7 +57,7 @@ def validate_profile(profile):
         Dictionary with validation result and any errors
     """
     
-    required_fields = ["candidate_id", "name", "contact", "academics", "career", "portfolio"]
+    required_fields = ["candidate_id", "name", "contact", "academics", "career", "skills", "portfolio"]
     missing_fields = [field for field in required_fields if field not in profile]
     
     if missing_fields:

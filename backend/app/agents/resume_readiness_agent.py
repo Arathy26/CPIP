@@ -18,7 +18,19 @@ CHANGED (3 real fixes):
 
 import re
 
-_METRIC_PATTERN = re.compile(r"\d+\s*%")  # e.g. "30%", "reduced by 15 %"
+# Quantified impact: "30%", "15 %", "500+", "3x" / "3X"
+_METRIC_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*%|\d+\s*\+|\b\d+(?:\.\d+)?\s*[xX]\b")
+
+
+def _clean(skills):
+    """Trimmed, lowercase, no empty entries."""
+    return {str(s).strip().lower() for s in (skills or []) if s and str(s).strip()}
+
+
+def _contains_skill(text_lower, skill_lower):
+    """Whole-skill match: 'c' must not match inside 'react', 'java' not inside 'javascript'."""
+    pattern = r"(?<![a-z0-9+#.])" + re.escape(skill_lower) + r"(?![a-z0-9+#])"
+    return re.search(pattern, text_lower) is not None
 
 
 def resume_readiness_agent(resume_data, required_skills=None):
@@ -30,8 +42,9 @@ def resume_readiness_agent(resume_data, required_skills=None):
             role_alignment, and now raw_text (from resume_parser.py)
         required_skills: list of skills required for the student's target
             role (pass in seed_data.get_role_requirements(role)["required_skills"]).
-            If None, role alignment falls back to the older text-match
-            signal instead of skill overlap.
+            Comes from recruiter postings (seed_data.get_role_requirements)
+            or from ONE selected job. If None, role alignment falls back to
+            the older text-match signal instead of skill overlap.
 
     Returns:
         Dictionary with resume readiness score, gaps, and specific tips.
@@ -78,29 +91,33 @@ def resume_readiness_agent(resume_data, required_skills=None):
         tips.append("Add your email and phone number so recruiters can reach you.")
 
     # ---- Role Alignment — FIXED: skill overlap, not exact text match -------
+    # Role alignment earns PARTIAL credit (matched / required) instead of a
+    # yes/no — so 1 of 10 skills no longer counts as fully aligned, and no
+    # arbitrary pass threshold is needed.
     role_alignment_score = None
-    if required_skills:
-        candidate_skills_lower = set(s.lower() for s in resume_data.get("skills", []))
-        required_lower = set(s.lower() for s in required_skills)
+    role_alignment_credit = 0.0
+    required_lower = _clean(required_skills)
+    if required_lower:
+        candidate_skills_lower = _clean(resume_data.get("skills", []))
         matched = candidate_skills_lower & required_lower
-        role_alignment_score = (
-            int((len(matched) / len(required_lower)) * 100) if required_lower else 0
-        )
-        if role_alignment_score > 0:
+        role_alignment_credit = len(matched) / len(required_lower)
+        role_alignment_score = int(role_alignment_credit * 100)
+        display = {str(s).strip().lower(): str(s).strip() for s in required_skills if s and str(s).strip()}
+        missing_for_role = [display.get(k, k) for k in sorted(required_lower - candidate_skills_lower)]
+        if not missing_for_role:
             sections_present.append("Role Alignment")
         else:
             sections_missing.append("Role Alignment")
-            missing_for_role = sorted(required_lower - candidate_skills_lower)
-            if missing_for_role:
-                tips.append(
-                    f"Your resume doesn't show skills required for this role: "
-                    f"{', '.join(missing_for_role)}."
-                )
+            tips.append(
+                f"Your resume shows {len(matched)} of {len(required_lower)} skills "
+                f"recruiters ask for in this role. Missing: {', '.join(missing_for_role)}."
+            )
     else:
         # No configured requirements for this role — fall back to the
         # older, weaker text-match signal rather than skipping the check.
         if resume_data.get("role_alignment"):
             sections_present.append("Role Alignment")
+            role_alignment_credit = 1.0
         else:
             sections_missing.append("Role Alignment")
             tips.append("Mention your target role or relevant skills clearly in your resume.")
@@ -118,18 +135,18 @@ def resume_readiness_agent(resume_data, required_skills=None):
 
     # ---- Keyword match (NEW) — how well the text matches the role's language
     keyword_match_percent = None
-    if required_skills and raw_text:
-        required_lower = set(s.lower() for s in required_skills)
+    if required_lower and raw_text:
         text_lower = raw_text.lower()
-        present_keywords = [s for s in required_lower if s in text_lower]
-        keyword_match_percent = (
-            int((len(present_keywords) / len(required_lower)) * 100) if required_lower else None
-        )
+        present_keywords = [s for s in required_lower if _contains_skill(text_lower, s)]
+        keyword_match_percent = int((len(present_keywords) / len(required_lower)) * 100)
 
     # ---- Score: 6 sections now (added Quantified Impact) -------------------
+    # 5 yes/no checks + role alignment (partial credit 0.0-1.0)
     total_possible = 6
+    yes_no_present = len([x for x in sections_present if x != "Role Alignment"])
+    earned = yes_no_present + role_alignment_credit
     present_count = len(sections_present)
-    resume_score = int((present_count / total_possible) * 100)
+    resume_score = int((earned / total_possible) * 100)
 
     if resume_score >= 80:
         readiness = "High - Interview ready"
@@ -151,6 +168,7 @@ def resume_readiness_agent(resume_data, required_skills=None):
         "sections_needed": len(sections_missing),
         "readiness_level": readiness,
         "resume_analysis": f"{present_count} of {total_possible} resume sections complete",
+        "role_requirements_available": bool(required_lower),
     }
 
 

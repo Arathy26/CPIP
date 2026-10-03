@@ -1,5 +1,22 @@
-// API Base URL - SINGLE DECLARATION ONLY
-const API_BASE = 'http://127.0.0.1:8000/api';
+// API base URL — ONE place. Set VITE_API_URL in frontend/.env for deployment
+// (e.g. VITE_API_URL=https://cpip-i6il.onrender.com). Local default below.
+export const API_ROOT = (
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_BACKEND_URL ||
+  'http://127.0.0.1:8000'
+).replace(/\/+$/, '');
+export const API_BASE = `${API_ROOT}/api`;
+
+const sendJson = (url, method, body) =>
+  fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(async (r) => {
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || `Request failed (${r.status})`);
+    return data;
+  });
 
 const cpipApi = {
   // Candidate endpoints
@@ -56,8 +73,20 @@ const cpipApi = {
     return fetch(`${API_BASE}/jobs${params}`).then(r => r.json());
   },
 
+  // Recruiter side: candidates matched to one posting
   getMatchedCandidates: (jobId) =>
-    fetch(`${API_BASE}/jobs/${jobId}/matches`).then(r => r.json()),
+    fetch(`${API_BASE}/jobs/${jobId}/candidates`).then(r => r.json()),
+
+  // Recruiter bulk upload (CSV). Valid rows are saved, invalid rows returned in `errors`.
+  bulkUploadJobs: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return fetch(`${API_BASE}/jobs/bulk`, { method: 'POST', body: formData }).then(r => r.json());
+  },
+
+  // Close a posting (kept for audit; hidden from candidates)
+  deleteJob: (jobId) =>
+    fetch(`${API_BASE}/jobs/${jobId}`, { method: 'DELETE' }).then(r => r.json()),
 
   // Resume Upload (new student flow)
   uploadResume: (formData) =>
@@ -75,16 +104,9 @@ const cpipApi = {
       method: 'POST',
     }).then(r => r.json()),
 
-  // External Jobs search
-  searchExternalJobs: (query, studentId) => {
-    const params = new URLSearchParams({ query });
-    if (studentId) params.append('student_id', studentId);
-    return fetch(`${API_BASE}/jobs/external/search?${params}`).then(r => r.json());
-  },
-
   // Recruiter endpoints
   updateJob: (jobId, jobData) =>
-    fetch(`${API_BASE}/recruiter/jobs/${jobId}`, {
+    fetch(`${API_BASE}/jobs/${jobId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(jobData)
@@ -114,6 +136,20 @@ const cpipApi = {
     fetch(`${API_BASE}/students/${studentId}/role-history`).then(r => r.json()),
 
   // ── Upload resume for existing student ────────────────────────
+  // ── Student evidence (student edits) ───────────────────────────
+  updateSkills: (studentId, skills) =>
+    sendJson(`${API_BASE}/students/${studentId}/skills`, 'PUT', { skills }),
+
+  updatePortfolioLinks: (studentId, links) =>
+    sendJson(`${API_BASE}/students/${studentId}/portfolio-links`, 'PUT', links),
+
+  updateLocation: (studentId, location) =>
+    sendJson(`${API_BASE}/students/${studentId}/location`, 'PUT', { location }),
+
+  // ── Mock interview (recorded by a mentor) ──────────────────────
+  recordInterviewAssessment: (assessment) =>
+    sendJson(`${API_BASE}/interview-assessments`, 'POST', assessment),
+
   uploadResumeForStudent: (studentId, file) => {
     const formData = new FormData();
     formData.append('file', file);

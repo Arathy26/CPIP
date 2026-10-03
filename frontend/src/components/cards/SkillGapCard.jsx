@@ -1,10 +1,12 @@
 import { useState } from 'react';
 
-export default function SkillGapCard({ skillsHave, skillsMissing, score, basedOnPostings, resumeQuality }) {
+export default function SkillGapCard({ skillsHave, skillsMissing, score, basedOnPostings, resumeQuality, message }) {
   const [showAllMissing, setShowAllMissing] = useState(false);
 
-  const scoreColor =
-    score >= 80 ? 'text-green-600' : score >= 60 ? 'text-blue-600' : 'text-amber-600';
+  const hasScore = score !== null && score !== undefined;
+  const scoreColor = !hasScore
+    ? 'text-gray-300'
+    : score >= 80 ? 'text-green-600' : score >= 60 ? 'text-blue-600' : 'text-amber-600';
 
   const normalizedMissing = (skillsMissing || []).map((item) =>
     typeof item === 'string'
@@ -25,14 +27,14 @@ export default function SkillGapCard({ skillsHave, skillsMissing, score, basedOn
             <p className="font-semibold text-gray-900">Skill Gap</p>
             <p className="text-sm text-gray-500">
               {basedOnPostings
-                ? `Based on ${basedOnPostings} real job postings`
-                : 'Skills vs role requirements'}
+                ? `Based on ${basedOnPostings} recruiter posting(s) for your target role`
+                : message || 'Skills vs role requirements'}
             </p>
           </div>
         </div>
         <div className="text-right">
-          <span className={`text-2xl font-bold ${scoreColor}`}>{score}</span>
-          <span className="block text-xs text-gray-400">/100</span>
+          <span className={`text-2xl font-bold ${scoreColor}`}>{hasScore ? score : '—'}</span>
+          <span className="block text-xs text-gray-400">{hasScore ? '/100' : 'not assessed'}</span>
         </div>
       </div>
 

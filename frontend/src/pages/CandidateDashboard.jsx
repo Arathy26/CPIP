@@ -3,78 +3,12 @@ import { useParams } from 'react-router-dom';
 import CareerReadinessPanel from '../components/cards/CareerReadinessPanel';
 import SkillGapCard from '../components/cards/SkillGapCard';
 import JobMatchCard from '../components/cards/JobMatchCard';
+import NextStepsCard from '../components/cards/NextStepsCard';
+import StudentEvidenceCard from '../components/cards/StudentEvidenceCard';
+import MockInterviewForm from '../components/cards/MockInterviewForm';
 import { useCPIP } from '../hooks/useCPIP';
 import cpipApi from '../services/cpipApi';
 import Fuse from 'fuse.js';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
-// ── Job Search Component ─────────────────────────────────────────
-function JobSearch({ studentId, onRoleSearch }) {
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState(null);
-  const [status, setStatus] = useState('idle');
-  const [errorMessage, setErrorMessage] = useState('');
-
-  const handleSearch = async () => {
-    if (!query.trim()) return;
-    setStatus('loading');
-    setErrorMessage('');
-    const roleGuess = query.trim().split(' ').slice(0, 2).join(' ');
-    if (onRoleSearch) onRoleSearch(roleGuess);
-    try {
-      const data = await cpipApi.searchExternalJobs(query.trim(), studentId);
-      if (data.detail) throw new Error(data.detail);
-      setResults(data.jobs || []);
-      setStatus('done');
-    } catch (err) {
-      setErrorMessage(err.message || 'Search failed.');
-      setStatus('error');
-    }
-  };
-
-  return (
-    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-4">
-      <p className="font-semibold text-gray-900 mb-1">Search real listings</p>
-      <p className="text-sm text-gray-500 mb-4">Live external jobs via Adzuna</p>
-      <div className="flex gap-2 mb-4">
-        <input type="text" value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-          placeholder="e.g. python developer jobs in Kochi"
-          className="flex-1 px-4 py-2 rounded-lg border-2 border-gray-200 focus:border-purple-500 focus:outline-none" />
-        <button onClick={handleSearch}
-          disabled={!query.trim() || status === 'loading'}
-          className={`px-6 py-2 rounded-lg font-semibold ${query.trim() && status !== 'loading' ? 'bg-purple-600 text-white hover:bg-purple-700' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}>
-          {status === 'loading' ? 'Searching…' : 'Search'}
-        </button>
-      </div>
-      {status === 'error' && <p className="text-red-600 text-sm">{errorMessage}</p>}
-      {status === 'done' && results.length === 0 && <p className="text-gray-500 text-sm">No listings found.</p>}
-      {status === 'done' && results.length > 0 && (
-        <div className="space-y-3">
-          {results.slice(0, 5).map((job) => (
-            <div key={job.job_id} className="border border-gray-100 rounded-lg p-4">
-              <div className="flex justify-between items-start gap-4">
-                <div>
-                  <p className="font-semibold text-gray-900">{job.title}</p>
-                  <p className="text-sm text-gray-500">{job.company} • {job.location}</p>
-                </div>
-                {job.skill_overlap_percent != null && (
-                  <span className="text-xs font-semibold px-2 py-1 rounded bg-blue-50 text-blue-700 shrink-0">
-                    {job.skill_overlap_percent}% overlap
-                  </span>
-                )}
-              </div>
-              <a href={job.apply_link} target="_blank" rel="noopener noreferrer"
-                className="text-sm text-purple-600 font-semibold mt-2 inline-block">View →</a>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ── Location Bar Component ───────────────────────────────────────
 function LocationBar({ currentLocation, onLocationChange }) {
@@ -100,7 +34,7 @@ function LocationBar({ currentLocation, onLocationChange }) {
           className="flex-1 px-3 py-1.5 rounded-lg border border-purple-300 text-sm focus:border-purple-500 focus:outline-none" />
         <button onClick={handleSave} disabled={!input.trim()}
           className="px-4 py-1.5 bg-purple-600 text-white rounded-lg text-sm font-semibold hover:bg-purple-700 disabled:opacity-50">
-          Find Jobs
+          Save
         </button>
         <button onClick={() => { setEditing(false); setInput(''); }}
           className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
@@ -111,7 +45,8 @@ function LocationBar({ currentLocation, onLocationChange }) {
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-5 py-3 mb-3 flex items-center justify-between">
       <p className="text-sm text-gray-600">
-        📍 Showing jobs in <strong className="text-purple-700">{currentLocation || 'your location'}</strong>
+        📍 Preferred location: <strong className="text-purple-700">{currentLocation || 'not set'}</strong>
+        <span className="text-gray-400"> · jobs are matched on skills; use the location filter below to narrow them</span>
       </p>
       <button onClick={() => setEditing(true)}
         className="text-xs text-purple-500 hover:text-purple-700 font-medium">
@@ -124,29 +59,30 @@ function LocationBar({ currentLocation, onLocationChange }) {
 // ── Main Dashboard ───────────────────────────────────────────────
 export default function CandidateDashboard() {
   const { studentId } = useParams();
-  const [searchedRole, setSearchedRole] = useState(null);
-  const [preferredLocation, setPreferredLocation] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = () => setRefreshKey((k) => k + 1);
+
+  const {
+    readiness, calculation, scoresMissing, targetRole, jobs, skillsHave, skillsMissing, gapScore,
+    skillGapMessage, basedOnPostings, jobMatches, actionPlans, profile,
+    interviewScore, portfolioScore, resumeScore, topMissingSkill, loading, error,
+  } = useCPIP(refreshKey);
+
   const [studentLocation, setStudentLocation] = useState('');
-
-  // Load student location on mount
+  const [locationError, setLocationError] = useState('');
   useEffect(() => {
-    if (!studentId) return;
-    fetch(`${API_BASE}/api/students/with-resumes`)
-  .then(r => r.json())
-  .then(data => {
-    const student = (data.students || []).find(s => s.id === parseInt(studentId));
-    const loc = student?.location || '';
-        setStudentLocation(loc);
-        if (loc && loc !== 'not specified') {
-          setPreferredLocation(loc);
-        }
-      })
-      .catch(() => {});
-  }, [studentId]);
+    const loc = profile?.contact?.location;
+    setStudentLocation(loc && loc.trim().toLowerCase() !== 'not specified' ? loc : '');
+  }, [profile]);
 
-  const handleLocationChange = (newLoc) => {
-    setStudentLocation(newLoc);
-    setPreferredLocation(newLoc);
+  const handleLocationChange = async (newLoc) => {
+    setLocationError('');
+    try {
+      await cpipApi.updateLocation(studentId, newLoc);
+      setStudentLocation(newLoc);
+    } catch (err) {
+      setLocationError(err.message);
+    }
   };
 
   // Filters
@@ -155,19 +91,14 @@ export default function CandidateDashboard() {
   const [searchFilter, setSearchFilter] = useState('');
   const [workTypeFilter, setWorkTypeFilter] = useState('all');
 
-  const {
-    readiness, jobs, skillsHave, skillsMissing, gapScore,
-    skillGapSupported, basedOnPostings, resumeQuality, jobMatches,
-    interviewScore, portfolioScore, resumeScore, topMissingSkill,
-  } = useCPIP(searchedRole, preferredLocation);
-
-  const uniqueSuitabilities = [...new Set(jobMatches.map(j => j.suitability).filter(Boolean))];
+  const uniqueSuitabilities = [...new Set(jobMatches.map(j => j.fit_category).filter(Boolean))];
 
   const filteredJobs = (() => {
     let filtered = jobMatches;
-    if (suitabilityFilter !== 'all') filtered = filtered.filter(j => j.suitability === suitabilityFilter);
-    if (workTypeFilter === 'remote') filtered = filtered.filter(j => j.is_remote === true);
-    else if (workTypeFilter === 'onsite') filtered = filtered.filter(j => j.is_remote === false);
+    if (suitabilityFilter !== 'all') filtered = filtered.filter(j => j.fit_category === suitabilityFilter);
+    const isRemote = (j) => (j.location || '').toLowerCase().includes('remote');
+    if (workTypeFilter === 'remote') filtered = filtered.filter(isRemote);
+    else if (workTypeFilter === 'onsite') filtered = filtered.filter(j => !isRemote(j));
     if (searchFilter) filtered = filtered.filter(j =>
       j.job_title?.toLowerCase().includes(searchFilter.toLowerCase()) ||
       j.company_name?.toLowerCase().includes(searchFilter.toLowerCase())
@@ -181,32 +112,53 @@ export default function CandidateDashboard() {
 
   const hasActiveFilters = locationFilter || suitabilityFilter !== 'all' || searchFilter || workTypeFilter !== 'all';
 
+  if (loading) {
+    return <div className="dashboard-container text-gray-500 text-sm p-8">Loading your readiness…</div>;
+  }
+  if (error) {
+    return <div className="dashboard-container text-red-600 text-sm p-8">{error}</div>;
+  }
+
   return (
     <div className="dashboard-container">
       <CareerReadinessPanel
-        readiness={readiness} jobs={jobs}
+        readiness={readiness} calculation={calculation} scoresMissing={scoresMissing} targetRole={targetRole} jobs={jobs}
         interviewScore={interviewScore} portfolioScore={portfolioScore}
-        resumeScore={resumeScore} topMissingSkill={topMissingSkill}
+        resumeScore={resumeScore} topMissingSkill={topMissingSkill} gapScore={gapScore}
       />
 
-      {skillGapSupported && (
-        <SkillGapCard
-          skillsHave={skillsHave} skillsMissing={skillsMissing}
-          score={gapScore} basedOnPostings={basedOnPostings} resumeQuality={resumeQuality}
-        />
-      )}
+      <SkillGapCard
+        skillsHave={skillsHave} skillsMissing={skillsMissing}
+        score={gapScore} basedOnPostings={basedOnPostings} message={skillGapMessage}
+      />
 
-      {/* Location bar — always visible */}
+      <NextStepsCard actions={actionPlans} />
+
+      <StudentEvidenceCard studentId={studentId} profile={profile} onSaved={reload} />
+
+      <MockInterviewForm studentId={studentId} onSaved={reload} />
+
       <LocationBar
         currentLocation={studentLocation}
         onLocationChange={handleLocationChange}
       />
+      {locationError && <p className="text-xs text-red-600 -mt-2 mb-3">{locationError}</p>}
 
-      {jobMatches.length > 0 && (
-        <div className="mt-4">
-          <p className="text-sm font-semibold tracking-wide text-gray-500 mb-3">
-            JOB MATCHES ({filteredJobs.length} of {jobMatches.length})
+      <div className="mt-4">
+          <p className="text-sm font-semibold tracking-wide text-gray-500 mb-1">
+            MATCHING ROLES ({filteredJobs.length} of {jobMatches.length})
           </p>
+          <p className="text-xs text-gray-400 mb-3">
+            Roles posted by recruiters on CPIP that match your skills. Matching is skills-only.
+          </p>
+
+          {jobMatches.length === 0 && (
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-8 text-center text-gray-500 text-sm">
+              No matching roles yet. New roles appear here when recruiters post jobs that fit your skills.
+            </div>
+          )}
+
+          {jobMatches.length > 0 && (<>
 
           {/* Filters */}
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 mb-4">
@@ -221,7 +173,6 @@ export default function CandidateDashboard() {
                 className="px-3 py-2 rounded-lg border border-gray-200 text-sm focus:border-purple-500 focus:outline-none">
                 <option value="all">💼 All Work Types</option>
                 <option value="remote">🏠 Remote</option>
-                <option value="hybrid">🔄 Hybrid</option>
                 <option value="onsite">🏢 On-site</option>
               </select>
               <select value={suitabilityFilter} onChange={(e) => setSuitabilityFilter(e.target.value)}
@@ -239,14 +190,13 @@ export default function CandidateDashboard() {
           </div>
 
           {filteredJobs.length === 0 ? (
-            <p className="text-gray-500 text-sm text-center py-8">No jobs match your filters.</p>
+            <p className="text-gray-500 text-sm text-center py-8">No roles match your filters.</p>
           ) : (
-            filteredJobs.map((match, i) => <JobMatchCard key={i} match={match} />)
+            filteredJobs.map((match) => <JobMatchCard key={match.job_id} match={match} />)
           )}
-        </div>
-      )}
+          </>)}
+      </div>
 
-      <JobSearch studentId={studentId} onRoleSearch={setSearchedRole} />
     </div>
   );
 }
