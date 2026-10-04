@@ -59,6 +59,7 @@ dist/
 backend/uploads/
 *.db
 CPIP_Repomix_*.md
+Stage*_Phase*.md
 CPIP_*Closure_Summary.md
 CPIP_*Learning_Story.html
 CPIP_Product_Vision_Statement.md
