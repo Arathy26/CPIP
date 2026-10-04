@@ -58,3 +58,4 @@ dist/
 # Local data - never commit
 backend/uploads/
 *.db
+CPIP_Repomix_*.md
